@@ -1,6 +1,6 @@
 module Main where
 
-import Lib
+import Funcy.Processing.Values
 
 main :: IO ()
-main = someFunc
+main = putStrLn "Hello, World!"
