@@ -4,7 +4,7 @@ github:              "Abastro/Funcy-Compiler"
 license:             BSD3
 author:              "Abastro"
 maintainer:          "abab9579@gmail.com"
-copyright:           "2019 Abastro"
+copyright:           "2020 Abastro"
 
 extra-source-files:
 - README.md

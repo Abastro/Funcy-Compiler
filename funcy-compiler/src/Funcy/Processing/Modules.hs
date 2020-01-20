@@ -12,6 +12,7 @@ import Control.Monad
 
 import qualified Data.Map.Lazy as Map
 import qualified Data.Set as Set
+import           Text.Printf                    ( printf )
 
 data Containment c t = Containment {
     wrap :: t -> c,
@@ -71,6 +72,8 @@ type DepDistrib = Map.Map Domain Domain
 
 -- Dependencies for moduloid m. Here m represents the sum type of supported types.
 data Dependencies dep = DepInfo DirectDeps DepDistrib
+instance Show (Dependencies dep) where
+    show (DepInfo deps _) = printf "Depends on %s" $ show $ Set.toList deps
 
 
 -- Domained group with dependencies
@@ -92,7 +95,7 @@ instance DomainedGroup Void where
 
 
 -- Representation of Module Domain
-newtype ModuleDomain loc = MInstance Domain
+newtype ModuleDomain loc = MInstance Domain deriving Show
 
 -- DomainedLocal class, which represents the local type with given domain name
 class DomainedLocal loc where

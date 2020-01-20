@@ -8,11 +8,14 @@ module Funcy.Processing.Values where
 
 import Control.Applicative
 import Control.Monad
-import Control.Arrow
 
-import Data.Tuple
+import Control.Monad.Reader
+import Control.Monad.Writer
+import Control.Monad.State
+
 import Data.Function
 import Data.Functor
+import Data.Functor.Identity
 import Data.Foldable
 
 import Data.Graph as Graph
@@ -21,7 +24,6 @@ import qualified Data.Map.Strict as MapS
 import qualified Data.Set as Set
 
 import Funcy.Processing.Modules
-
 
 {-----------------------------------------------------------------------------------------------------------------------------------
                                                     Abstract Syntx Tree
@@ -47,55 +49,53 @@ class MultiSugar p where
                                                         References
 ------------------------------------------------------------------------------------------------------------------------------------}
 -- Map from reference to destination names
-newtype Refs = Refs { refMap :: MapS.Map String [String] }
+newtype Refs = MkRefs { runRef :: MapS.Map String [String] }
 
-type Referred a = (Refs, a)
+type Referred = WriterT Refs Identity
 type IdRefed a = Idented (Referred a)
 
 referred :: Maybe String -> Referred a -> Referred a
-referred (Just ident) = first $ Refs . MapS.insert ident [ident] . refMap
-referred Nothing = id
+referred = maybe id $ \ident -> censor $ MkRefs . MapS.insert ident [ident] . runRef
 
 found :: Maybe String -> Referred a -> Referred a
-found (Just ident) = first $ Refs . MapS.delete ident . refMap
-found Nothing = id
+found = maybe id $ \ident -> censor $ MkRefs . MapS.delete ident . runRef
 
 foundMany :: [String] -> Referred a -> Referred a
-foundMany keys = first $ Refs . (`MapS.withoutKeys` Set.fromList keys) . refMap
+foundMany keys = censor $ MkRefs . (`MapS.withoutKeys` Set.fromList keys) . runRef
 
 
 instance Semigroup Refs where
-    x <> y = Refs $ MapS.unionWith (++) (refMap x) (refMap y)
+    x <> y = MkRefs $ MapS.unionWith (++) (runRef x) (runRef y)
 instance Monoid Refs where
-    mempty = Refs MapS.empty
+    mempty = MkRefs MapS.empty
 
 {-----------------------------------------------------------------------------------------------------------------------------------
                                                         Reference Tracking
 ------------------------------------------------------------------------------------------------------------------------------------}
 
 asErr :: SCC (IdRefed a) -> Refs
-asErr (AcyclicSCC vertex) = Refs MapS.empty
-asErr (CyclicSCC vertices) = Refs $ let refs = fst <$> vertices
-    in MapS.singleton ("_cyclic" <> concat refs) refs
+asErr (AcyclicSCC vertex) = MkRefs MapS.empty
+asErr (CyclicSCC vertices) = MkRefs $ let refs = fst <$> vertices
+      in MapS.singleton ("_cyclic" <> concat refs) refs
 
--- Tracks unbound references and sorts them by referential order, while converting multiple branch into binaries
+-- Finds unbound references and Sorts referencs by referential order, while converting multiple branch into binaries
 -- TODO: Deal with modules?
-trackRefs :: MultiSugar p => AST MultiBranch p -> Referred (AST BiBranch (Desugar p))
-trackRefs (AST flag branch) = case branch of
+sortRefs :: MultiSugar p => AST MultiBranch p -> Referred (AST BiBranch (Desugar p))
+sortRefs (AST flag branch) = case branch of
     NormBranch bi -> bi
-            & traverse trackRefs                                    -- Traverse over the branch, tracking references
+            & traverse sortRefs                                    -- Traverse over the branch, tracking references
             <&> AST (intrpret flag)                                 -- (Re-)attach flag
             & found (binding flag)                                  -- Remove references to current binding
             & referred (refer flag)                                 -- Add current reference
     MultiBranch comps -> comps
-            <&> preSort . fmap trackRefs                            -- Construct reference graph (refering -> refered)
+            <&> preSort . fmap sortRefs                            -- Construct reference graph (refering -> refered)
             & Graph.stronglyConnComp                                -- Perform topological sort (term which never get refered comes to head)
             <&> postSort                                            -- Deconstruct sorted components and place in error
-            & foundMany (fst <$> comps) . mconcat                   -- Merge unbound references and remove bound references
+            & foundMany (fst <$> comps) . fmap concat . sequenceA   -- Merge unbound references and remove bound references
             <&> foldl' step initial                                 -- Fold multiple branches into binaries. The most-refered root comes out to head
         where
-            preSort node = let (ident, (refs, _)) = node in (node, ident, MapS.keys $ refMap refs)
-            postSort component = (asErr component, []) <> traverse sequenceA (flattenSCC component)
+            preSort (ident, res) = ((ident, res), ident, MapS.keys $ runRef $ execWriter res)
+            postSort component = writer ([], asErr component) *> traverse sequenceA (flattenSCC component)
             initial = AST (intrpret flag) Leaf
             step other (ident, cont) = AST (withId flag ident) $ Branch cont other
 
@@ -111,8 +111,29 @@ _ : tp, proof search
 Rules of Constructions
 -}
 
-data Term
-data ConstraintKind = Equality | Typed
 
-data Constraint = Constraint ConstraintKind Term Term
+-- Constaint t a b means a should unify with b under type t
+data Constraint t = Constraint t t t
 
+-- Known terms
+type Known t = MapL.Map String t
+
+-- Unified terms
+type Unified t = (Known t, [Constraint t])
+
+type RWT r w m a = ReaderT r (WriterT w m) a
+
+-- Denotes terms getting inferred
+type Infer t a = RWT (Known t) [Constraint t] Identity a
+
+-- Denotes solving process of constraints
+type Solve t a = StateT (Unified t) Identity a
+
+-- Typeclass for typed terms
+class TypedTerm t where
+    findType :: t -> BiBranch (Infer t a) -> Infer t a
+    unify :: Constraint t -> Solve t a
+    unifyMany :: [Constraint t] -> Solve t a
+
+
+-- I'm too lazy to write more now -.-
