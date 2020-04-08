@@ -6,6 +6,7 @@ import Control.Applicative
 import Control.Monad.Reader
 import Control.Monad.Writer
 import Control.Monad.Except
+import Control.Monad.State
 
 import Data.Function
 import Data.Functor
@@ -15,6 +16,7 @@ import Data.Foldable
 import qualified Data.Set as Set
 import qualified Data.Graph as Graph
 import qualified Data.Map.Strict as MapS
+import qualified Data.Map.Lazy as MapL
 
 import Funcy.Processing.AST
 
@@ -62,7 +64,7 @@ type Detail = [String]
 
 asErr :: Graph.SCC (String, Writer (Refer Detail) a) -> Refer Detail
 asErr (Graph.AcyclicSCC _) = mempty
-asErr (Graph.CyclicSCC vertices) = let refs = fmap fst vertices in singleRef ("_cyclic" <> mconcat refs) refs -- Need elaborate error
+asErr (Graph.CyclicSCC vertices) = let refs = fmap fst vertices in singleRef ("_cyclic" <> mconcat refs) refs -- Need to elaborate error
 
 -- Finds unbound references and Sorts referencs by referential order, while converting multiple branch into binaries
 organizeRefs :: MultiSugar p => Location -> AST MultiBranch p -> Writer (Refer Detail) (AST BiBranch (Desugar p))
@@ -87,5 +89,48 @@ organizeRefs loc (Branch flag branch) = case branch of
         where
             preSort (ident, res) = ((ident, res), ident, allRefs $ execWriter res)
             postSort component = writer ([], asErr component) *> traverse sequenceA (Graph.flattenSCC component)
-            initial = Leaf (Internal "Block") -- Placeholder
+            initial = Leaf (Internal "Chain") -- Placeholder
             step other (ident, cont) = Branch (withId flag ident) $ BiBranch cont other
+
+
+{-----------------------------------------------------------------------------------------------------------------------------------
+                                                        Typing
+------------------------------------------------------------------------------------------------------------------------------------}
+
+{-
+t1 ~ t2, (term) unification (System of equation solving)
+Full equality / inference with implementation detals hidden
+_ : tp, proof search
+Rules of Constructions
+-}
+
+-- Type analysis uses bibranch exclusively
+type Term = AST BiBranch
+
+
+-- Constaint t a b means a should unify with b under type t
+data Constraint t = Constraint t t t
+
+-- Known terms?
+type Known t = MapL.Map String t
+
+-- Unified terms
+type Unified t = (Known t, [Constraint t])
+
+type RWT r w m a = ReaderT r (WriterT w m) a
+
+-- Denotes inference procedure
+type Infer t a = RWT (Known t) [Constraint t] Identity a
+
+-- Denotes solving procedure
+type Solve t a = StateT (Unified t) Identity a
+
+-- Typeclass for typed terms
+class Typer p where
+    findType :: p -> BiBranch (Infer (Term p) a) -> Infer (Term p) a
+    unify :: Constraint (Term p) -> Solve (Term p) a
+    unifyMany :: [Constraint (Term p)] -> Solve (Term p) a
+
+infer :: Typer p => Term p -> Infer (Term p) (Term p)
+infer (Leaf ref) = _
+infer (Branch flag branch) = _
