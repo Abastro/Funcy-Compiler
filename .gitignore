@@ -1,6 +1,4 @@
 .stack-work/
-
 *.cabal
 Setup.hs
-
 *.code-workspace
