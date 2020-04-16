@@ -1,3 +1,4 @@
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeFamilies #-}
 
 module Funcy.Processing.Analysis where
@@ -8,6 +9,7 @@ import Control.Monad.Writer
 import Control.Monad.Except
 import Control.Monad.State
 
+import Data.List
 import Data.Function
 import Data.Functor
 import Data.Functor.Identity
@@ -24,15 +26,15 @@ import Funcy.Processing.AST
                                                         Reference Tracking
 ------------------------------------------------------------------------------------------------------------------------------------}
 
+data MultiBranch t = NormBranch (BiBranch t) | MultiBranch [(Binding, t)]
+
 class MultiSugar p where
     type Desugar p
     interpret :: p -> Desugar p
     binding :: p -> Maybe Binding
     withId :: p -> Binding -> Desugar p
 
-{-----------------------------------------------------------------------------------------------------------------------------------
-                                                        References
-------------------------------------------------------------------------------------------------------------------------------------}
+
 -- Map from references
 newtype Refer t = MkRefs { runRef :: MapS.Map Binding t }
 
@@ -55,46 +57,57 @@ instance Semigroup t => Monoid (Refer t) where
     mempty = MkRefs MapS.empty
 
 
-type Location = [String]
-type Detail = [String]
+type Location = [Binding]
+type Detail = Location
+
+type RWT r w m a = ReaderT r (WriterT w m) a
+
+type Organize a = RWT Location (Refer Detail) Identity a
 
 {-----------------------------------------------------------------------------------------------------------------------------------
                                                         Reference Organizing
 ------------------------------------------------------------------------------------------------------------------------------------}
 
-asErr :: Graph.SCC (String, Writer (Refer Detail) a) -> Refer Detail
-asErr (Graph.AcyclicSCC _) = mempty
-asErr (Graph.CyclicSCC vertices) = let refs = fmap fst vertices in singleRef ("_cyclic" <> mconcat refs) refs -- Need to elaborate error
+-- Log the error for later
+asErr :: Graph.SCC (Binding, a) -> Location -> Refer Detail
+asErr (Graph.AcyclicSCC _) _ = mempty
+asErr (Graph.CyclicSCC vertices) loc = let refs = fmap fst vertices
+    in singleRef (":cyclic:" <> mconcat (intersperse "," refs)) $ loc <> (":" : refs) -- Need to elaborate error
 
 -- Finds unbound references and Sorts referencs by referential order, while converting multiple branch into binaries
-organizeRefs :: MultiSugar p => Location -> AST MultiBranch p -> Writer (Refer Detail) (AST BiBranch (Desugar p))
-organizeRefs loc (Leaf ref) = writer (Leaf ref, case ref of
-    InRef (h:_) -> singleRef h loc -- What to do here?
-    _ -> mempty)
-organizeRefs loc (Branch flag branch) = case branch of
-    NormBranch bi ->
-        bi
-        & traverse (organizeRefs loc)                                    -- Traverse over the branch, tracking references
-        <&> Branch (interpret flag)                            -- (Re-)attach flag
-        & (maybe id $ censor . removeRef) (binding flag)       -- Remove references to current binding
-    MultiBranch comps ->
-        comps
-        <&> uncurry (\id -> (,) id . organizeRefs (id : loc))
-        <&> preSort                                             -- Construct reference graph (refering -> refered)
-        & Graph.stronglyConnComp                                -- Perform topological sort (term which never get refered comes to head)
-        <&> postSort                                            -- Deconstruct sorted components and place in error
-        & fmap mconcat . sequenceA                              -- Merge references
-        & (censor . removeRefs) (fst <$> comps)                 -- Remove bound references
-        <&> foldl' step initial                                 -- Fold multiple branches into binaries. The most-refered root comes out to head
-        where
-            preSort (ident, res) = ((ident, res), ident, allRefs $ execWriter res)
-            postSort component = writer ([], asErr component) *> traverse sequenceA (Graph.flattenSCC component)
-            initial = Leaf (Internal "Chain") -- Placeholder
-            step other (ident, cont) = Branch (withId flag ident) $ BiBranch cont other
+organizeRefs :: MultiSugar p => AST MultiBranch p -> Organize (AST BiBranch (Desugar p))
+organizeRefs (Leaf (InRef ref)) = do
+    location <- ask
+    writer (Leaf (InRef ref),
+        singleRef (head ref) location) -- Tracks head only
+
+organizeRefs (Leaf ref) = pure $ Leaf ref
+
+organizeRefs (Branch flag (NormBranch br)) = pass $ do
+    br' <- traverse organizeRefs br -- Traverse over the branch, tracking references
+    pure (Branch (interpret flag) br', -- (Re-)attach flag
+        maybe id removeRef (binding flag)) -- Remove references to current binding
+
+organizeRefs (Branch flag (MultiBranch brs)) = pass $ do
+    brs' <- traverse preSort brs -- Traverse over the branch, tracking references
+    let sorted = Graph.stronglyConnComp brs' -- Topological sort
+    brs'' <- traverse postSort sorted -- Traverse over components, flattening it
+    pure (foldl' step initial $ mconcat brs'', -- Accumulates the result
+        removeRefs $ fmap fst brs) -- Remove references to current binding
+    where
+        preSort (id, br) = do
+            br' <- listen $ local (id :) $ organizeRefs br
+            pure ((id, fst br'), id, allRefs $ snd br')        
+        postSort :: Graph.SCC (Binding, a) -> Organize [(Binding, a)]
+        postSort comp = do
+            location <- ask
+            writer (Graph.flattenSCC comp, asErr comp location)
+        initial = Leaf (Internal "Chain") -- Placeholder
+        step other (ident, cont) = Branch (withId flag ident) $ BiBranch cont other
 
 
 {-----------------------------------------------------------------------------------------------------------------------------------
-                                                        Typing
+                                                Typing & Reference Validity Checking
 ------------------------------------------------------------------------------------------------------------------------------------}
 
 {-
@@ -104,6 +117,13 @@ _ : tp, proof search
 Rules of Constructions
 -}
 
+-- Typeclass for typed terms
+class Typer p where
+    findType :: p -> BiBranch (Infer (Term p) a) -> Infer (Term p) a
+    unify :: Constraint (Term p) -> Solve (Term p) a
+    unifyMany :: [Constraint (Term p)] -> Solve (Term p) a
+
+
 -- Type analysis uses bibranch exclusively
 type Term = AST BiBranch
 
@@ -111,13 +131,12 @@ type Term = AST BiBranch
 -- Constaint t a b means a should unify with b under type t
 data Constraint t = Constraint t t t
 
--- Known terms?
+-- Known terms
 type Known t = MapL.Map String t
 
 -- Unified terms
 type Unified t = (Known t, [Constraint t])
 
-type RWT r w m a = ReaderT r (WriterT w m) a
 
 -- Denotes inference procedure
 type Infer t a = RWT (Known t) [Constraint t] Identity a
@@ -125,12 +144,10 @@ type Infer t a = RWT (Known t) [Constraint t] Identity a
 -- Denotes solving procedure
 type Solve t a = StateT (Unified t) Identity a
 
--- Typeclass for typed terms
-class Typer p where
-    findType :: p -> BiBranch (Infer (Term p) a) -> Infer (Term p) a
-    unify :: Constraint (Term p) -> Solve (Term p) a
-    unifyMany :: [Constraint (Term p)] -> Solve (Term p) a
 
 infer :: Typer p => Term p -> Infer (Term p) (Term p)
-infer (Leaf ref) = _
+infer (Leaf ref) = case ref of
+    InRef (x : xs) -> do
+        _
+    Internal _ -> _
 infer (Branch flag branch) = _

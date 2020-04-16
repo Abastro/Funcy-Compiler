@@ -5,11 +5,10 @@ module Funcy.Processing.AST where
                                                     Abstract Syntx Tree
 ------------------------------------------------------------------------------------------------------------------------------------}
 
-data Reference = RefError String | InRef [Binding] | Internal String deriving (Eq, Ord)
+data Reference = InRef [Binding] | Internal String deriving (Eq, Ord)
 
 data AST m p = Leaf Reference | Branch p (m (AST m p))
 data BiBranch t = BiBranch t t deriving (Functor, Foldable, Traversable)
-data MultiBranch t = NormBranch (BiBranch t) | MultiBranch [(Binding, t)]
 
 instance Functor m => Functor (AST m) where
     fmap f (Leaf ref) = Leaf ref
@@ -18,6 +17,7 @@ instance Functor m => Functor (AST m) where
 
 -- Binding reference name
 type Binding = String
+
 
 data CoreFlag =
     IntroFunc Binding | ElimFunc
