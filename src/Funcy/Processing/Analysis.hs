@@ -26,13 +26,15 @@ import Funcy.Processing.AST
                                                         Reference Tracking
 ------------------------------------------------------------------------------------------------------------------------------------}
 
-data MultiBranch t = NormBranch (BiBranch t) | MultiBranch [(Binding, t)]
+data Multi t = Bi (Binary t) | Multi [(Binding, t)]
 
 class MultiSugar p where
     type Desugar p
-    interpret :: p -> Desugar p
+    -- Extract the Binding involved.
     binding :: p -> Maybe Binding
-    withId :: p -> Binding -> Desugar p
+
+    -- Interpret the flag, possibly with ID. Multiple one happens with cyclic references.
+    interpret :: [Binding] -> p -> Desugar p
 
 
 -- Map from references
@@ -58,52 +60,47 @@ instance Semigroup t => Monoid (Refer t) where
 
 
 type Location = [Binding]
-type Detail = Location
 
 type RWT r w m a = ReaderT r (WriterT w m) a
 
-type Organize a = RWT Location (Refer Detail) Identity a
+type Organize a = RWT Location (Refer Location) Identity a
 
 {-----------------------------------------------------------------------------------------------------------------------------------
                                                         Reference Organizing
 ------------------------------------------------------------------------------------------------------------------------------------}
 
--- Log the error for later
-asErr :: Graph.SCC (Binding, a) -> Location -> Refer Detail
-asErr (Graph.AcyclicSCC _) _ = mempty
-asErr (Graph.CyclicSCC vertices) loc = let refs = fmap fst vertices
-    in singleRef (":cyclic:" <> mconcat (intersperse "," refs)) $ loc <> (":" : refs) -- Need to elaborate error
-
 -- Finds unbound references and Sorts referencs by referential order, while converting multiple branch into binaries
-organizeRefs :: MultiSugar p => AST MultiBranch p -> Organize (AST BiBranch (Desugar p))
-organizeRefs (Leaf (InRef ref)) = do
+organizeRefs :: MultiSugar p => AST Multi p -> Organize (AST Binary (Desugar p))
+organizeRefs (Leaf (InRef parent chs)) = do
     location <- ask
-    writer (Leaf (InRef ref),
-        singleRef (head ref) location) -- Tracks head only
+    writer (Leaf (InRef parent chs),
+        singleRef parent location) -- Tracks head only
 
 organizeRefs (Leaf ref) = pure $ Leaf ref
 
-organizeRefs (Branch flag (NormBranch br)) = pass $ do
+organizeRefs (Branch flag (Bi br)) = pass $ do
     br' <- traverse organizeRefs br -- Traverse over the branch, tracking references
-    pure (Branch (interpret flag) br', -- (Re-)attach flag
+    pure (Branch (interpret [] flag) br', -- (Re-)attach flag
         maybe id removeRef (binding flag)) -- Remove references to current binding
 
-organizeRefs (Branch flag (MultiBranch brs)) = pass $ do
-    brs' <- traverse preSort brs -- Traverse over the branch, tracking references
+organizeRefs (Branch flag (Multi brs)) = pass $ do
+    brs' <- traverse subCall brs -- Traverse over the branch, tracking references
     let sorted = Graph.stronglyConnComp brs' -- Topological sort
-    brs'' <- traverse postSort sorted -- Traverse over components, flattening it
-    pure (foldl' step initial $ mconcat brs'', -- Accumulates the result
+    brs'' <- traverse foldComp sorted -- Traverse over components, folding it into individual branch
+    pure (foldl' step initial brs'', -- Accumulates the result
         removeRefs $ fmap fst brs) -- Remove references to current binding
     where
-        preSort (id, br) = do
-            br' <- listen $ local (id :) $ organizeRefs br
-            pure ((id, fst br'), id, allRefs $ snd br')        
-        postSort :: Graph.SCC (Binding, a) -> Organize [(Binding, a)]
-        postSort comp = do
-            location <- ask
-            writer (Graph.flattenSCC comp, asErr comp location)
+        subCall (id, br) = do
+            br' <- listen $ local (id :) $ organizeRefs br -- Call with updated location
+            pure ((id, fst br'), id, allRefs $ snd br')
+
+        foldComp (Graph.AcyclicSCC br) = pure $ singular br
+        foldComp (Graph.CyclicSCC brs) = pure (fmap fst brs,
+            foldl' step initial $ fmap singular brs) -- Accumulates cyclic references separately
+
         initial = Leaf (Internal "Chain") -- Placeholder
-        step other (ident, cont) = Branch (withId flag ident) $ BiBranch cont other
+        step other (idents, cont) = Branch (interpret idents flag) $ Binary cont other
+        singular (ident, t) = ([ident], t)
 
 
 {-----------------------------------------------------------------------------------------------------------------------------------
@@ -119,20 +116,30 @@ Rules of Constructions
 
 -- Typeclass for typed terms
 class Typer p where
-    findType :: p -> BiBranch (Infer (Term p) a) -> Infer (Term p) a
+    findType :: p -> Binary (Infer (Term p) a) -> Infer (Term p) a
     unify :: Constraint (Term p) -> Solve (Term p) a
     unifyMany :: [Constraint (Term p)] -> Solve (Term p) a
 
 
 -- Type analysis uses bibranch exclusively
-type Term = AST BiBranch
+type Term = AST Binary
 
+-- Term accompanied with the type involved
+data Typed t = Typed {
+    ttype :: t,
+    term :: t
+}
+type TypedTerm p = Typed (Term p)
 
 -- Constaint t a b means a should unify with b under type t
-data Constraint t = Constraint t t t
+data Constraint t = Constraint {
+    ctype :: t,
+    termA :: t,
+    termB :: t
+}
 
 -- Known terms
-type Known t = MapL.Map String t
+type Known t = MapL.Map Binding (Typed t)
 
 -- Unified terms
 type Unified t = (Known t, [Constraint t])
@@ -145,9 +152,12 @@ type Infer t a = RWT (Known t) [Constraint t] Identity a
 type Solve t a = StateT (Unified t) Identity a
 
 
-infer :: Typer p => Term p -> Infer (Term p) (Term p)
+infer :: Typer p => Term p -> Infer (Term p) (TypedTerm p)
 infer (Leaf ref) = case ref of
-    InRef (x : xs) -> do
-        _
+    InRef parent chs -> do
+        refed <- asks $ MapL.lookup parent
+        pure $ case refed of
+            Just (Typed t _) -> Typed t $ Leaf ref
+            Nothing -> Typed (Leaf $ Internal "RefError") (Leaf $ Internal "RefError")
     Internal _ -> _
 infer (Branch flag branch) = _
