@@ -8,6 +8,7 @@ import Control.Monad.Reader
 import Control.Monad.Writer
 import Control.Monad.Except
 import Control.Monad.State
+import Control.Monad.RWS
 
 import Data.List
 import Data.Function
@@ -116,48 +117,60 @@ Rules of Constructions
 
 -- Typeclass for typed terms
 class Typer p where
-    findType :: p -> Binary (Infer (Term p) a) -> Infer (Term p) a
-    unify :: Constraint (Term p) -> Solve (Term p) a
-    unifyMany :: [Constraint (Term p)] -> Solve (Term p) a
+    internal :: String -> Term p
+
+    -- Check type of left side
+    checkLeft :: NameGen n => p -> Term p
+        -> Infer n p (Bound (Term p))
+    -- Check type of right side
+    checkRight :: NameGen n => p -> Term p
+        -> Infer n p (Term p)
+    -- Combine
+    combine :: p -> Term p -> Term p -> Infer n p (Term p)
 
 
 -- Type analysis uses bibranch exclusively
 type Term = AST Binary
 
--- Term accompanied with the type involved
-data Typed t = Typed {
-    ttype :: t,
-    term :: t
-}
-type TypedTerm p = Typed (Term p)
-
 -- Constaint t a b means a should unify with b under type t
 data Constraint t = Constraint {
-    ctype :: t,
+    ttype :: t,
     termA :: t,
     termB :: t
 }
 
--- Known terms
-type Known t = MapL.Map Binding (Typed t)
+-- Known types of bindings
+type Known t = MapL.Map Binding t
+
+type Bound t = Writer (Known t) t
 
 -- Unified terms
 type Unified t = (Known t, [Constraint t])
 
+class NameGen n where
+    generateName :: Binding -> n -> Binding
+    updateName :: n -> n
 
 -- Denotes inference procedure
-type Infer t a = RWT (Known t) [Constraint t] Identity a
+type Infer s p a = RWST (Known (Term p)) [Constraint (Term p)] s Identity a
 
 -- Denotes solving procedure
-type Solve t a = StateT (Unified t) Identity a
+type Solve p a = StateT (Unified (Term p)) Identity a
 
-
-infer :: Typer p => Term p -> Infer (Term p) (TypedTerm p)
+-- Infers type of each term
+infer :: (Typer p, NameGen n) => Term p -> Infer n p (Term p)
 infer (Leaf ref) = case ref of
     InRef parent chs -> do
         refed <- asks $ MapL.lookup parent
         pure $ case refed of
-            Just (Typed t _) -> Typed t $ Leaf ref
-            Nothing -> Typed (Leaf $ Internal "RefError") (Leaf $ Internal "RefError")
-    Internal _ -> _
-infer (Branch flag branch) = _
+            Just t -> t
+            Nothing -> Leaf $ Internal "RefError" -- TODO: More detailed error / fresh name supply?
+    Internal name -> pure $ internal name
+
+infer (Branch flag (Binary l r)) = do
+    bnder <- infer l >>= checkLeft flag     -- Infer type of left term
+    let (ltype, bound) = runWriter bnder
+    let updated = local (MapL.union bound)  -- Localize for obtained bounds
+    rtype <- updated (infer r) >>= checkRight flag -- Infer type of right term
+    modify updateName
+    combine flag ltype rtype                -- Combine left and right type to obtain the whole type

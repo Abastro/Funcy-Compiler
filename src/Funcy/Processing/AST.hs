@@ -20,5 +20,7 @@ type Binding = String
 
 
 data CoreFlag =
-    IntroFunc Binding | ElimFunc
-    | IntroPair Binding | ElimPair Binding Binding
+    IntroFunc Binding           -- \x : t1. t2
+    | ElimFunc                  -- t1 t2
+    | IntroPair Binding         -- (x = t1, t2)
+    | ElimPair Binding Binding  -- (p, q) = t1 in t2
