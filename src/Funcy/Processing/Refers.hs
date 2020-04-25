@@ -1,18 +1,10 @@
-{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeFamilies #-}
 
-module Funcy.Processing.Analysis where
+module Funcy.Processing.Refers where
 
-import Control.Applicative
 import Control.Monad.Reader
 import Control.Monad.Writer
-import Control.Monad.Except
-import Control.Monad.State
-import Control.Monad.RWS
 
-import Data.List
-import Data.Function
-import Data.Functor
 import Data.Functor.Identity
 import Data.Foldable
 
@@ -70,12 +62,13 @@ type Organize a = RWT Location (Refer Location) Identity a
                                                         Reference Organizing
 ------------------------------------------------------------------------------------------------------------------------------------}
 
--- Finds unbound references and Sorts referencs by referential order, while converting multiple branch into binaries
+-- Finds unbound references and Sorts referencs by referential order.
+-- Also converts multiple branch into binaries
 organizeRefs :: MultiSugar p => AST Multi p -> Organize (AST Binary (Desugar p))
-organizeRefs (Leaf (InRef parent chs)) = do
+organizeRefs (Leaf (InRef ref)) = do
     location <- ask
-    writer (Leaf (InRef parent chs),
-        singleRef parent location) -- Tracks head only
+    writer (Leaf (InRef ref),
+        singleRef ref location) -- Tracks head only
 
 organizeRefs (Leaf ref) = pure $ Leaf ref
 
@@ -103,74 +96,3 @@ organizeRefs (Branch flag (Multi brs)) = pass $ do
         step other (idents, cont) = Branch (interpret idents flag) $ Binary cont other
         singular (ident, t) = ([ident], t)
 
-
-{-----------------------------------------------------------------------------------------------------------------------------------
-                                                Typing & Reference Validity Checking
-------------------------------------------------------------------------------------------------------------------------------------}
-
-{-
-t1 ~ t2, (term) unification (System of equation solving)
-Full equality / inference with implementation detals hidden
-_ : tp, proof search
-Rules of Constructions
--}
-
--- Typeclass for typed terms
-class Typer p where
-    internal :: String -> Term p
-
-    -- Check type of left side
-    checkLeft :: NameGen n => p -> Term p
-        -> Infer n p (Bound (Term p))
-    -- Check type of right side
-    checkRight :: NameGen n => p -> Term p
-        -> Infer n p (Term p)
-    -- Combine
-    combine :: p -> Term p -> Term p -> Infer n p (Term p)
-
-
--- Type analysis uses bibranch exclusively
-type Term = AST Binary
-
--- Constaint t a b means a should unify with b under type t
-data Constraint t = Constraint {
-    ttype :: t,
-    termA :: t,
-    termB :: t
-}
-
--- Known types of bindings
-type Known t = MapL.Map Binding t
-
-type Bound t = Writer (Known t) t
-
--- Unified terms
-type Unified t = (Known t, [Constraint t])
-
-class NameGen n where
-    generateName :: Binding -> n -> Binding
-    updateName :: n -> n
-
--- Denotes inference procedure
-type Infer s p a = RWST (Known (Term p)) [Constraint (Term p)] s Identity a
-
--- Denotes solving procedure
-type Solve p a = StateT (Unified (Term p)) Identity a
-
--- Infers type of each term
-infer :: (Typer p, NameGen n) => Term p -> Infer n p (Term p)
-infer (Leaf ref) = case ref of
-    InRef parent chs -> do
-        refed <- asks $ MapL.lookup parent
-        pure $ case refed of
-            Just t -> t
-            Nothing -> Leaf $ Internal "RefError" -- TODO: More detailed error / fresh name supply?
-    Internal name -> pure $ internal name
-
-infer (Branch flag (Binary l r)) = do
-    bnder <- infer l >>= checkLeft flag     -- Infer type of left term
-    let (ltype, bound) = runWriter bnder
-    let updated = local (MapL.union bound)  -- Localize for obtained bounds
-    rtype <- updated (infer r) >>= checkRight flag -- Infer type of right term
-    modify updateName
-    combine flag ltype rtype                -- Combine left and right type to obtain the whole type
