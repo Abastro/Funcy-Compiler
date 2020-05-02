@@ -15,11 +15,19 @@ import qualified Data.Map.Lazy as MapL
 
 import Funcy.Processing.AST
 
+
+-- Reference-specific branch structure
+data Multi t = Bi (Binary t) | Multi [(Binding, t)]
+
+refChain = Internal ["Chain"]
+
 {-----------------------------------------------------------------------------------------------------------------------------------
                                                         Reference Tracking
 ------------------------------------------------------------------------------------------------------------------------------------}
 
-data Multi t = Bi (Binary t) | Multi [(Binding, t)]
+-- TODO Syntactic sugar handling
+-- TODO Load required module first (Need elaborate module system)
+-- Dot-overloading (foo.bar) - As a class constraint, resolved right away when trivial
 
 class MultiSugar p where
     type Desugar p
@@ -31,32 +39,21 @@ class MultiSugar p where
 
 
 -- Map from references
-newtype Refer t = MkRefs { runRef :: MapS.Map Binding t }
-
-
-singleRef :: Binding -> t -> Refer t
-singleRef ident = MkRefs . MapS.singleton ident
-
-removeRef :: Binding -> Refer t -> Refer t
-removeRef ident  = MkRefs . MapS.delete ident . runRef
+type Refer t = MapS.Map Binding t
 
 removeRefs :: [Binding] -> Refer t -> Refer t
-removeRefs idents = MkRefs . (`MapS.withoutKeys` Set.fromList idents) . runRef
+removeRefs idents = (`MapS.withoutKeys` Set.fromList idents)
 
-allRefs :: Refer t -> [Binding]
-allRefs = MapS.keys . runRef
-
+{-
 instance Semigroup t => Semigroup (Refer t) where
     x <> y = MkRefs $ MapS.unionWith (<>) (runRef x) (runRef y)
 instance Semigroup t => Monoid (Refer t) where
     mempty = MkRefs MapS.empty
-
+-}
 
 type Location = [Binding]
 
-type RWT r w m a = ReaderT r (WriterT w m) a
-
-type Organize a = RWT Location (Refer Location) Identity a
+type Organize a = ReaderT Location (WriterT (Refer Location) Identity) a
 
 {-----------------------------------------------------------------------------------------------------------------------------------
                                                         Reference Organizing
@@ -68,14 +65,15 @@ organizeRefs :: MultiSugar p => AST Multi p -> Organize (AST Binary (Desugar p))
 organizeRefs (Leaf (InRef ref)) = do
     location <- ask
     writer (Leaf (InRef ref),
-        singleRef ref location) -- Tracks head only
+        MapS.singleton ref location) -- Tracks head only
 
 organizeRefs (Leaf ref) = pure $ Leaf ref
 
 organizeRefs (Branch flag (Bi br)) = pass $ do
+    -- TODO: Localize location
     br' <- traverse organizeRefs br -- Traverse over the branch, tracking references
     pure (Branch (interpret [] flag) br', -- (Re-)attach flag
-        maybe id removeRef (binding flag)) -- Remove references to current binding
+        maybe id MapS.delete (binding flag)) -- Remove references to current binding
 
 organizeRefs (Branch flag (Multi brs)) = pass $ do
     brs' <- traverse subCall brs -- Traverse over the branch, tracking references
@@ -86,13 +84,13 @@ organizeRefs (Branch flag (Multi brs)) = pass $ do
     where
         subCall (id, br) = do
             br' <- listen $ local (id :) $ organizeRefs br -- Call with updated location
-            pure ((id, fst br'), id, allRefs $ snd br')
+            pure ((id, fst br'), id, MapS.keys $ snd br')
 
         foldComp (Graph.AcyclicSCC br) = pure $ singular br
         foldComp (Graph.CyclicSCC brs) = pure (fmap fst brs,
             foldl' step initial $ fmap singular brs) -- Accumulates cyclic references separately
 
-        initial = Leaf (Internal "Chain") -- Placeholder
+        initial = Leaf refChain -- Placeholder
         step other (idents, cont) = Branch (interpret idents flag) $ Binary cont other
         singular (ident, t) = ([ident], t)
 

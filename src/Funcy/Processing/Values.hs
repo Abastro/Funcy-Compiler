@@ -1,9 +1,3 @@
-{-# LANGUAGE DeriveTraversable #-}
-{-# LANGUAGE DeriveFunctor #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE FlexibleContexts #-}
-
 module Funcy.Processing.Values where
 
 import Control.Applicative
