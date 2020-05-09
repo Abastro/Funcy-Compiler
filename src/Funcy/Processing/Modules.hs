@@ -22,11 +22,60 @@ import GHC.Generics
 
 import Text.Printf
 
+-- Inclusion type, to represent inclusion relationship
+data Include p c = Inclusion {
+    wrap :: c -> p,
+    unwrap :: p -> Maybe c
+}
+
+type p :>: c = Include p c
+
+idIn :: a :>: a
+idIn = Inclusion id Just
+
+composeIn :: b :>: c -> a :>: b -> a :>: c
+composeIn i j = Inclusion {
+    wrap = wrap j . wrap i,
+    unwrap = unwrap j >=> unwrap i
+}
+
+(>.>) = composeIn
+
+bijection :: (a -> b) -> (b -> a) -> b :>: a
+bijection w u = Inclusion w (Just . u)
+
+leftIn :: (f :+: g) p :>: f p
+leftIn = Inclusion {
+    wrap = L1,
+    unwrap = \x -> case x of L1 p -> Just p; R1 _ -> Nothing
+}
+rightIn :: (f :+: g) p :>: g p
+rightIn = Inclusion {
+    wrap = R1,
+    unwrap = \x -> case x of L1 _ -> Nothing; R1 p -> Just p
+}
+
+
+-- Expansive features which can applied to parents
+class Expansive f where
+    expand :: Include p c -> f c -> f p
+
 
 -- A type which can represent all types a module requires
 -- Type dep consists of the direct dependency module types
-newtype ModuleType loc dep = WrapModule { containerType :: Either dep loc }
+data ModuleType loc dep = Dep dep | Local loc
 
+depIn :: ModuleType loc dep :>: dep
+depIn = Inclusion {
+    wrap = Dep,
+    unwrap = \x -> case x of Dep d -> Just d; _ -> Nothing
+}
+
+localIn :: ModuleType loc dep :>: loc
+localIn = Inclusion {
+    wrap = Local,
+    unwrap = \x -> case x of Local l -> Just l; _ -> Nothing
+}
 
 -- Domain which specifies the module
 type Domain = String
@@ -87,66 +136,66 @@ instance (DomainedLocal loc, ModuleGroup dep) => ModuleGroup (ModuleType loc dep
 
 
 -- Element-specific feature - Use generic deriving
-class (Functor f) => ElementFeature f t where
+class (Expansive f) => ElementFeature f t where
     featureOf :: t -> f t
 
     default featureOf :: (Generic t, ElementFeature' f (Rep t)) => t -> f t
-    featureOf = fmap to . featureOf' . from
+    featureOf = expand (bijection to from) . featureOf' . from
 
-class (Functor f) => ElementFeature' f g where
+class (Expansive f) => ElementFeature' f g where
     featureOf' :: g p -> f (g p)
 
-instance (Functor f) => ElementFeature' f V1 where
+instance (Expansive f) => ElementFeature' f V1 where
     featureOf' = undefined
 
 instance (ElementFeature f c) => ElementFeature' f (K1 i c) where
-    featureOf' (K1 x) = K1 <$> featureOf x
+    featureOf' (K1 x) = expand (bijection K1 unK1) $ featureOf x
 
 instance (ElementFeature' f g) => ElementFeature' f (M1 i t g) where
-    featureOf' (M1 x) = M1 <$> featureOf' x
+    featureOf' (M1 x) = expand (bijection M1 unM1) $ featureOf' x
 
 instance (ElementFeature' i f, ElementFeature' i g) => ElementFeature' i (f :+: g) where
-    featureOf' (L1 x) = L1 <$> featureOf' x
-    featureOf' (R1 x) = R1 <$> featureOf' x
+    featureOf' (L1 x) = expand leftIn $ featureOf' x
+    featureOf' (R1 x) = expand rightIn $ featureOf' x
 
 
 instance (DomainedLocal loc, ElementFeature f loc, ElementFeature f dep) => ElementFeature f (ModuleType loc dep) where
-    featureOf elem = case containerType elem of
-        Left el -> WrapModule . Left <$> featureOf el
-        Right el -> WrapModule . Right <$> featureOf el
+    featureOf elem = case elem of
+        Dep el -> expand depIn $ featureOf el
+        Local el -> expand localIn $ featureOf el
 
 
 -- Feature extraction from certain domain - Use generic deriving
 -- Searches more efficiently via immediately calculating which route to go for
-class (Functor f, ModuleGroup t) => DomainedFeature f t where
+class (Expansive f, ModuleGroup t) => DomainedFeature f t where
     findFeature :: Domain -> Maybe (f t)
 
     default findFeature :: (Generic t, DomainedFeature' f (Rep t)) => Domain -> Maybe (f t)
-    findFeature = (fmap . fmap) to . findFeature'
+    findFeature = fmap (expand $ bijection to from) . findFeature'
 
-class (Functor f, ModuleGroup' g) => DomainedFeature' f g where
+class (Expansive f, ModuleGroup' g) => DomainedFeature' f g where
     findFeature' :: Domain -> Maybe (f (g p))
 
 
-instance (Functor f) => DomainedFeature' f V1 where
+instance (Expansive f) => DomainedFeature' f V1 where
     findFeature' _ = Nothing
 
 instance (DomainedFeature f c) => DomainedFeature' f (K1 i c) where
-    findFeature' = (fmap . fmap) K1 . findFeature
+    findFeature' = fmap (expand $ bijection K1 unK1) . findFeature
 
 instance (DomainedFeature' f g) => DomainedFeature' f (M1 i t g) where
-    findFeature' = (fmap . fmap) M1 . findFeature'
+    findFeature' = fmap (expand $ bijection M1 unM1) . findFeature'
 
 instance (DomainedFeature' i f, DomainedFeature' i g) => DomainedFeature' i (f :+: g) where
     findFeature' domain = do
         dirDomain <- directDep dependencies' domain
-        expand dirDomain L1 <|> expand dirDomain R1
+        expandUsing dirDomain leftIn <|> expandUsing dirDomain rightIn
         where
             directDep :: Dependencies dep -> Domain -> Maybe (ModuleDomain dep)
             directDep (DepInfo _ distrib) domain = MInstance <$> Map.lookup domain distrib
 
-            expand :: DomainedFeature' f g => ModuleDomain h -> (g p -> h) -> Maybe (f h)
-            expand (MInstance domain) trans = fmap trans <$> findIn dependencies' domain
+            expandUsing :: DomainedFeature' f g => ModuleDomain h -> (h :>: g p) -> Maybe (f h)
+            expandUsing (MInstance domain) trans = expand trans <$> findIn dependencies' domain
 
             findIn :: DomainedFeature' f g => Dependencies (g p) -> Domain -> Maybe (f (g p))
             findIn (DepInfo dirs _) domain = if Set.member domain dirs then findFeature' domain else Nothing
@@ -160,7 +209,7 @@ class (Functor f, DomainedLocal loc) => FeatureImpl f loc dep where
 
 instance (FeatureImpl f loc dep, DomainedFeature f dep) => DomainedFeature f (ModuleType loc dep) where
     findFeature domain = featureInModule domain mInstance
-        <|> (fmap . fmap) (WrapModule . Left) (findFeature domain) -- Not here
+        <|> (fmap . fmap) Dep (findFeature domain) -- Not here
         where
             featureInModule :: FeatureImpl f loc dep => Domain -> ModuleDomain loc -> Maybe (f (ModuleType loc dep))
             featureInModule domain (MInstance domM) = if domain == domM then Just featureImpl else Nothing

@@ -32,9 +32,9 @@ class Typer p where
     -- Errors when it's invalid
     internalType :: String -> [String] -> Term p
 
-    typing :: Context c => p -> Typing p c
+    typing :: Context c => p -> Typing c p
 
-data Typing p c = Typing {
+data Typing c p = Typing {
     -- Infer type of left side
     inferLeft :: Term p -> Infer c p (Binder (Term p)),
 
