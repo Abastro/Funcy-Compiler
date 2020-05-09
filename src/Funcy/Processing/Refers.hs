@@ -19,7 +19,7 @@ import Funcy.Processing.AST
 -- Reference-specific branch structure
 data Multi t = Bi (Binary t) | Multi [(Binding, t)]
 
-refChain = Internal ["Chain"]
+refChain = Internal "Chain" []
 
 {-----------------------------------------------------------------------------------------------------------------------------------
                                                         Reference Tracking

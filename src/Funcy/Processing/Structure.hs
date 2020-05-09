@@ -13,12 +13,12 @@ data TypeFlag =
 
 
 mkUni :: Int -> Reference
-mkUni num = Internal ["TypeUni", show num]
+mkUni num = Internal "TypeUni" [show num]
 
 tpPrefix = "force_"
 
 instance Typer TypeFlag where
-    internal ["TypeUni", num] = Leaf $ mkUni $ read num + 1
+    internalType "TypeUni" [num] = Leaf $ mkUni $ read num + 1
 
     typing Typed = Typing {
         inferLeft = \tp -> do
@@ -42,7 +42,7 @@ data BasicFlag =
     | IntroPair Binding         -- (x = t1, t2)
     | ElimPair Binding Binding  -- (p, q) = t1 in t2
 
--- TODO 2-type and r * r -> (2->r)
+-- TODO 2-type and case-specific r's into (2->r)
 
 lambda :: (Binding, Term BasicFlag) -> Term BasicFlag -> Term BasicFlag
 lambda (x, t) y = Branch (IntroFunc x) $ Binary t y
@@ -50,11 +50,11 @@ lambda (x, t) y = Branch (IntroFunc x) $ Binary t y
 apply :: Term BasicFlag -> Term BasicFlag -> Term BasicFlag
 apply f x = Branch ElimFunc $ Binary f x
 
-funcTFormer = Leaf $ Internal ["TypeFunc"]
-pairTFormer = Leaf $ Internal ["TypePair"]
+funcTFormer = Leaf $ Internal "TypeFunc" []
+pairTFormer = Leaf $ Internal "TypePair" []
 
 instance Typer BasicFlag where
-    internal _ = error "Not supported"
+    internalType = error "Not supported"
 
     typing (IntroFunc param) = Typing {
         inferLeft = \tpPar -> do
@@ -97,7 +97,7 @@ instance Typer BasicFlag where
     typing (ElimPair p1 p2) = Typing {
         inferLeft = \pair -> do
             tDep <- asks $ var "a"
-            tRest <- asks $ var "b"
+            tRest <- asks $ var "b" -- refers local variables whose type is known obviously
             let tpDep = Leaf $ InRef tDep
             let tpRest = Leaf $ InRef tRest
 

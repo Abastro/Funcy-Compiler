@@ -28,8 +28,10 @@ import Funcy.Processing.AST
 
 -- Typeclass for typed terms
 class Typer p where
-    internal :: [String] -> Term p
-   
+
+    -- Errors when it's invalid
+    internalType :: String -> [String] -> Term p
+
     typing :: Context c => p -> Typing p c
 
 data Typing p c = Typing {
@@ -102,8 +104,8 @@ infer :: (Context c, Typer p) => Term p -> Infer c p (Term p)
 infer (Leaf l) = case l of
     InRef ref -> do
         refed <- asks $ inspect ref
-        pure $ fromMaybe (Leaf $ Internal ["RefError"]) refed -- TODO: More detailed error
-    Internal name -> pure $ internal name
+        pure $ fromMaybe (Leaf $ Internal "RefError" []) refed -- TODO: More detailed error
+    Internal key other -> pure $ internalType key other
 
 infer (Branch flag (Binary l r)) = do
     let typer = typing flag

@@ -4,64 +4,27 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE TypeOperators #-}
 
 module Funcy.Processing.Modules where
 
 import Control.Applicative
 import Control.Monad
 
-import qualified Data.Map.Lazy as Map
+import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import           Text.Printf                    ( printf )
 
-data Containment c t = Containment {
-    wrap :: t -> c,
-    unwrap :: c -> Maybe t
-}
+import Data.Void
 
-idCont :: Containment a a
-idCont = Containment {
-    wrap = id,
-    unwrap = Just
-}
-
-chainCont :: Containment b a -> Containment c b -> Containment c a
-chainCont con2 con1 = Containment {
-    wrap = wrap con1 . wrap con2,
-    unwrap = unwrap con1 >=> unwrap con2
-}
-
-containLeft :: Containment (Either a b) a
-containLeft = Containment {
-    wrap = Left,
-    unwrap = either Just (const Nothing)
-}
-
-containRight :: Containment (Either a b) b
-containRight = Containment {
-    wrap = Right,
-    unwrap = either (const Nothing) Just
-}
-
-
-class Expansive f where
-    expandWith :: Containment b a -> f a -> f b
-
-newtype Broad f c a = Broad { deBroad :: Containment c a -> f c }
-instance Expansive (Broad f c) where
-    expandWith cont toFeature = Broad (deBroad toFeature . chainCont cont)
+import Text.Printf
 
 
 -- A type which can represent all types a module requires
 -- Type dep consists of the direct dependency module types
-newtype ModuleType loc dep = FormModule { containerType :: Either loc dep }
+newtype ModuleType loc dep = WrapModule { containerType :: Either loc dep }
 
-moduleWraps :: Containment (ModuleType loc dep) (Either loc dep)
-moduleWraps = Containment {
-    wrap = FormModule,
-    unwrap = Just . containerType
-}
 
+-- Domain which specifies the module
 type Domain = String
 
 -- Set of direct dependencies
@@ -76,54 +39,53 @@ instance Show (Dependencies dep) where
     show (DepInfo deps _) = printf "Depends on %s" $ show $ Set.toList deps
 
 
--- Domained group with dependencies
-class DomainedGroup g where
+-- Group of modules with dependencies
+class ModuleGroup g where
     dependencies :: Dependencies g
 
 -- Combines dependencies.
--- TODO : More efficient approach
 combineDeps :: Dependencies l -> Dependencies r -> Dependencies (Either l r)
-combineDeps (DepInfo dir1 distrib1) (DepInfo dir2 distrib2) = DepInfo (Set.union dir1 dir2) (Map.union distrib1 distrib2)
+combineDeps (DepInfo dir1 distrib1) (DepInfo dir2 distrib2) = DepInfo combDir combDistrib
+    where
+        combDir = Set.union dir1 dir2
+        combDistrib = Map.union distrib1 distrib2
 
-instance (DomainedGroup l, DomainedGroup r) => DomainedGroup (Either l r) where
+instance (ModuleGroup l, ModuleGroup r) => ModuleGroup (Either l r) where
     dependencies = combineDeps dependencies dependencies
 
-data Void
-
-instance DomainedGroup Void where
+instance ModuleGroup Void where
     dependencies = DepInfo Set.empty Map.empty
 
 
--- Representation of Module Domain
+-- Representation of domain for local type for each module
 newtype ModuleDomain loc = MInstance Domain deriving Show
-
--- DomainedLocal class, which represents the local type with given domain name
 class DomainedLocal loc where
     mInstance :: ModuleDomain loc
 
 
-createDependency :: Dependencies dep -> ModuleDomain loc -> Dependencies (ModuleType loc dep)
-createDependency (DepInfo _ depDist) (MInstance domain) = DepInfo (Set.singleton domain)
+createDep :: Dependencies dep -> ModuleDomain loc -> Dependencies (ModuleType loc dep)
+createDep (DepInfo _ depDist) (MInstance domain) = DepInfo (Set.singleton domain)
     $ foldr Map.union Map.empty $ fmap (`Map.singleton` domain) depDist
 
-instance (DomainedLocal loc, DomainedGroup dep) => DomainedGroup (ModuleType loc dep) where
-    dependencies = createDependency dependencies mInstance
+instance (DomainedLocal loc, ModuleGroup dep) => ModuleGroup (ModuleType loc dep) where
+    dependencies = createDep dependencies mInstance
 
 
--- Element-specific Feature
-class (Expansive f, DomainedGroup g) => ElementFeature f g where
+-- Element-specific feature
+class (Functor f, ModuleGroup g) => ElementFeature f g where
     featureOf :: g -> f g
 
--- Feature for certain local module, implemented by individual module
-class (Functor f, DomainedLocal loc) => LocalFeature f loc dep where
-    getFeature :: f (ModuleType loc dep)
+-- Actual implementation of feature for individual module.
+-- This should be implemented to search feature using domain.
+class (Functor f, DomainedLocal loc) => FeatureImpl f loc dep where
+    featureImpl :: f (ModuleType loc dep)
 
--- Feature extraction from certain domain
-class (Functor f, DomainedGroup g) => DomainedFeature f g where
+-- Feature extraction from certain domain, using feature implementation.
+class (Functor f, ModuleGroup g) => DomainedFeature f g where
     findFeature :: Domain -> Maybe (f g)
 
 
-instance (Expansive f) => ElementFeature f Void where
+instance (Functor f) => ElementFeature f Void where
     featureOf _ = error "impossible"
 
 instance (Functor f) => DomainedFeature f Void where
@@ -132,36 +94,33 @@ instance (Functor f) => DomainedFeature f Void where
 
 
 instance (ElementFeature f l, ElementFeature f r) => ElementFeature f (Either l r) where
-    featureOf = either
-        (expandWith containLeft . featureOf)
-        (expandWith containRight . featureOf)
+    featureOf = either (fmap Left . featureOf) (fmap Right . featureOf)
 
-
-getDirectDep :: Dependencies dep -> Domain -> Maybe (ModuleDomain dep)
-getDirectDep (DepInfo _ distrib) domain = MInstance <$> Map.lookup domain distrib
-
-findFeatureDep :: DomainedFeature f dep => Dependencies dep -> Domain -> Maybe (f dep)
-findFeatureDep (DepInfo dirs _) domain = if Set.member domain dirs then findFeature domain else Nothing
-
-expandFeature :: DomainedFeature f g => ModuleDomain h -> (g -> h) -> Maybe (f h)
-expandFeature (MInstance domain) trans = (fmap $ fmap trans) (findFeatureDep dependencies domain)
 
 -- Domained feature of Union
 instance (DomainedFeature f l, DomainedFeature f r) => DomainedFeature f (Either l r) where
     findFeature domain = do
-        dirDomain <- getDirectDep dependencies domain
-        expandFeature dirDomain Left <|> expandFeature dirDomain Right
+        dirDomain <- directDep dependencies domain
+        expand dirDomain Left <|> expand dirDomain Right
+        where
+            directDep :: Dependencies dep -> Domain -> Maybe (ModuleDomain dep)
+            directDep (DepInfo _ distrib) domain = MInstance <$> Map.lookup domain distrib
+
+            expand :: DomainedFeature f g => ModuleDomain h -> (g -> h) -> Maybe (f h)
+            expand (MInstance domain) trans = fmap trans <$> findIn dependencies domain
+
+            findIn :: DomainedFeature f dep => Dependencies dep -> Domain -> Maybe (f dep)
+            findIn (DepInfo dirs _) domain = if Set.member domain dirs then findFeature domain else Nothing
 
 
 instance (DomainedLocal loc, ElementFeature f loc, ElementFeature f dep) => ElementFeature f (ModuleType loc dep) where
     featureOf elem = case containerType elem of
-        Left el -> expandWith moduleWraps $ expandWith containLeft $ featureOf el
-        Right el -> expandWith moduleWraps $ expandWith containRight $ featureOf el
+        Left el -> WrapModule . Left <$> featureOf el
+        Right el -> WrapModule . Right <$> featureOf el
 
-instance (LocalFeature f loc dep, DomainedFeature f dep) => DomainedFeature f (ModuleType loc dep) where
-    findFeature domain = featureInModule domain mInstance <|> ( fmap $ fmap (FormModule . Right) ) (findFeature domain)
-
-featureInModule :: LocalFeature f loc dep => Domain -> ModuleDomain loc -> Maybe (f (ModuleType loc dep))
-featureInModule domain (MInstance domM) = if domain == domM then Just getFeature else Nothing
-
-
+instance (FeatureImpl f loc dep, DomainedFeature f dep) => DomainedFeature f (ModuleType loc dep) where
+    findFeature domain = featureInModule domain mInstance
+        <|> (fmap . fmap) (WrapModule . Right) (findFeature domain)
+        where
+            featureInModule :: FeatureImpl f loc dep => Domain -> ModuleDomain loc -> Maybe (f (ModuleType loc dep))
+            featureInModule domain (MInstance domM) = if domain == domM then Just featureImpl else Nothing
