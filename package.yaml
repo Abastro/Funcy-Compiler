@@ -24,6 +24,7 @@ dependencies:
 - containers >= 0.6 && < 0.7
 - array >= 0.5 && < 0.6
 - mtl >= 2.2 && < 2.3
+- generic-deriving >= 1.11 && < 1.14
 
 library:
   source-dirs: src
