@@ -7,6 +7,7 @@
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DefaultSignatures #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Funcy.Processing.Modules where
 
@@ -47,12 +48,12 @@ bijection w u = Inclusion w (Just . u)
 leftIn :: (f :+: g) p :>: f p
 leftIn = Inclusion {
     wrap = L1,
-    unwrap = \x -> case x of L1 p -> Just p; R1 _ -> Nothing
+    unwrap = \case L1 p -> Just p; R1 _ -> Nothing
 }
 rightIn :: (f :+: g) p :>: g p
 rightIn = Inclusion {
     wrap = R1,
-    unwrap = \x -> case x of L1 _ -> Nothing; R1 p -> Just p
+    unwrap = \case L1 _ -> Nothing; R1 p -> Just p
 }
 
 
@@ -68,13 +69,13 @@ data ModuleType loc dep = Dep dep | Local loc
 depIn :: ModuleType loc dep :>: dep
 depIn = Inclusion {
     wrap = Dep,
-    unwrap = \x -> case x of Dep d -> Just d; _ -> Nothing
+    unwrap = \case Dep d -> Just d; _ -> Nothing
 }
 
 localIn :: ModuleType loc dep :>: loc
 localIn = Inclusion {
     wrap = Local,
-    unwrap = \x -> case x of Local l -> Just l; _ -> Nothing
+    unwrap = \case Local l -> Just l; _ -> Nothing
 }
 
 -- Domain which specifies the module
@@ -158,11 +159,7 @@ instance (ElementFeature' i f, ElementFeature' i g) => ElementFeature' i (f :+: 
     featureOf' (L1 x) = expand leftIn $ featureOf' x
     featureOf' (R1 x) = expand rightIn $ featureOf' x
 
-
-instance (DomainedLocal loc, ElementFeature f loc, ElementFeature f dep) => ElementFeature f (ModuleType loc dep) where
-    featureOf elem = case elem of
-        Dep el -> expand depIn $ featureOf el
-        Local el -> expand localIn $ featureOf el
+instance (Expansive f) => ElementFeature f Void
 
 
 -- Feature extraction from certain domain - Use generic deriving
@@ -200,16 +197,26 @@ instance (DomainedFeature' i f, DomainedFeature' i g) => DomainedFeature' i (f :
             findIn :: DomainedFeature' f g => Dependencies (g p) -> Domain -> Maybe (f (g p))
             findIn (DepInfo dirs _) domain = if Set.member domain dirs then findFeature' domain else Nothing
 
+instance (Expansive f) => DomainedFeature f Void
 
 
--- Actual implementation of feature for individual module.
+-- Actual implementation of element-specific feature for individual module
+class (Expansive f, DomainedLocal loc) => FeatureElImpl f loc dep where
+    featureImplEl :: loc -> f (ModuleType loc dep)
+
+instance (DomainedLocal loc, FeatureElImpl f loc dep, ElementFeature f dep) => ElementFeature f (ModuleType loc dep) where
+    featureOf elem = case elem of
+        Dep el -> expand depIn $ featureOf el
+        Local el -> featureImplEl el
+
+-- Actual implementation of global feature for individual module.
 -- This should be implemented to search feature using domain.
-class (Functor f, DomainedLocal loc) => FeatureImpl f loc dep where
-    featureImpl :: f (ModuleType loc dep)
+class (Expansive f, DomainedLocal loc) => FeatureGlImpl f loc dep where
+    featureImplGl :: f (ModuleType loc dep)
 
-instance (FeatureImpl f loc dep, DomainedFeature f dep) => DomainedFeature f (ModuleType loc dep) where
+instance (FeatureGlImpl f loc dep, DomainedFeature f dep) => DomainedFeature f (ModuleType loc dep) where
     findFeature domain = featureInModule domain mInstance
-        <|> (fmap . fmap) Dep (findFeature domain) -- Not here
+        <|> expand depIn <$> findFeature domain -- Not here
         where
-            featureInModule :: FeatureImpl f loc dep => Domain -> ModuleDomain loc -> Maybe (f (ModuleType loc dep))
-            featureInModule domain (MInstance domM) = if domain == domM then Just featureImpl else Nothing
+            featureInModule :: FeatureGlImpl f loc dep => Domain -> ModuleDomain loc -> Maybe (f (ModuleType loc dep))
+            featureInModule domain (MInstance domM) = if domain == domM then Just featureImplGl else Nothing

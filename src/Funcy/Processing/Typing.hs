@@ -1,3 +1,5 @@
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 
 module Funcy.Processing.Typing where
@@ -21,29 +23,30 @@ import qualified Data.Map.Strict as MapS
 import qualified Data.Map.Lazy as MapL
 
 import Funcy.Processing.AST
+import Funcy.Processing.Modules
 
 {-----------------------------------------------------------------------------------------------------------------------------------
                                                         Type-related Terms
 ------------------------------------------------------------------------------------------------------------------------------------}
 
--- Typeclass for typed terms
-class Typer p where
-
-    -- Errors when it's invalid
-    internalType :: String -> [String] -> Term p
-
-    typing :: Context c => p -> Typing c p
-
 data Typing c p = Typing {
-    -- Infer type of left side
-    inferLeft :: Term p -> Infer c p (Binder (Term p)),
-
-    -- Infer type of right side
-    inferRight :: Term p -> Infer c p (Term p),
+    -- Binding from the left side - first parameter is term, second is type
+    bindType :: Term p -> Term p -> Infer c p [(Binding, Term p)],
 
     -- Combine two 'types'
     combine :: Term p -> Term p -> Infer c p (Term p)
 }
+
+newtype TypingWith c q p = TypingWith { runTyper :: (p -> q) -> Typing c q } deriving Functor
+
+instance Expansive (TypingWith c q) where
+    expand inc = fmap $ wrap inc
+
+
+newtype TypingIntern p = TypingIntern { runIntern :: [String] -> Either [String] (Term p) } deriving Functor
+
+instance Expansive TypingIntern where
+    expand inc = fmap $ wrap inc
 
 -- Type analysis uses bibranch exclusively
 type Term = AST Binary
@@ -60,16 +63,15 @@ Full equality / inference with implementation detals hidden
 
 -- Constaint t a b means a should unify with b under type t
 data Constraint t = Constraint {
-    ttype :: t,
     termA :: t,
     termB :: t
 }
 
-type Binder t = Writer [(Binding, t)] t
+data Side = LeftSide | RightSide
 
 class Context c where
     -- get (fresh) name from name supply within given context
-    var :: Binding -> c t -> Binding
+    getVar :: Binding -> c t -> Binding
 
     -- inspect type for certain name
     inspect :: Binding -> c t -> Maybe t
@@ -78,7 +80,7 @@ class Context c where
     applyBnd :: [(Binding, t)] -> c t -> c t
 
     -- get sub-context
-    subContext :: String -> c t -> c t
+    subContext :: Side -> c t -> c t
 
 
 -- Denotes inference procedure
@@ -88,33 +90,38 @@ type Infer c p a =
             WriterT [Constraint (Term p)]
             Identity)) a
 
-recall :: (Context c, Typer p) => Binding -> Infer c p (Maybe (Term p))
+
+var :: (Context c) => Binding -> Infer c p Binding
+var ident = asks (getVar ident)
+
+recall :: (Context c) => Binding -> Infer c p (Maybe (Term p))
 recall ref = asks (inspect ref)
 
 -- Strict recall - causes error if not detected
-recallS :: (Context c, Typer p) => Binding -> Infer c p (Term p)
+recallS :: (Context c) => Binding -> Infer c p (Term p)
 recallS ref = asks (inspect ref) >>= maybe (throwError "Internal Error") pure
 
--- Infer certain part
-inferFor :: (Context c, Typer p) => String -> Term p -> Infer c p (Term p)
-inferFor part = local (subContext part) . infer
+-- TODO: Formalize possible operations
 
 -- Infers type of each term
-infer :: (Context c, Typer p) => Term p -> Infer c p (Term p)
-infer (Leaf l) = case l of
-    InRef ref -> do
-        refed <- asks $ inspect ref
-        pure $ fromMaybe (Leaf $ Internal "RefError" []) refed -- TODO: More detailed error
-    Internal key other -> pure $ internalType key other
+infer :: (Context c, DomainedFeature TypingIntern p, ElementFeature (TypingWith c p) p) => Term p -> Infer c p (Term p)
+infer (Leaf r) = let referError = Leaf . Internal "ReferError" in
+    case r of
+        InRef ref -> do
+            refed <- asks $ inspect ref
+            pure $ fromMaybe (referError ["Binding", ref]) refed -- TODO: More detailed error
+        Internal key other -> do
+            let res = maybe (Left . (:) key) runIntern (findFeature key) other
+            pure $ either referError id res
 
 infer (Branch flag (Binary l r)) = do
-    let typer = typing flag
-    bnder <- infer l >>= inferLeft typer     -- Infer type of left term
-    let (ltype, bound) = runWriter bnder
+    let subInfer side t = local (subContext side) $ infer t
+    let typer = runTyper (featureOf flag) id
+    ltype <- subInfer LeftSide l  -- Infer type of left term
+    bound <- bindType typer l ltype
     let updated = local (applyBnd bound)  -- Localize for obtained bounds
-    rtype <- updated (infer r) >>= inferRight typer -- Infer type of right term
-    combine typer ltype rtype               -- Combine left and right type to obtain the whole type
-
+    rtype <- updated (subInfer RightSide r) -- Infer type of right term
+    updated $ combine typer ltype rtype -- Combine left and right type to obtain the whole type
 
 
 -- Unified terms
