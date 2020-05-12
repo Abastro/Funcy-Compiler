@@ -6,6 +6,7 @@ import Control.Monad.Writer
 import Control.Monad.Except
 
 import Data.Void
+import Data.Functor
 
 import Text.Read
 
@@ -34,16 +35,16 @@ instance FeatureGlImpl TypingIntern TypeFlag Void where
             maybe illegalArguments Right (readMaybe num)
         typeOf _ = illegalArguments
 
-instance (Context c) => FeatureElImpl (TypingWith c q) TypeFlag Void where
+instance FeatureElImpl (TypingWith q) TypeFlag Void where
     featureImplEl Typed = TypingWith $
         pure $ Typing {
             bindType = \tp _ -> do
-                tpName <- var tpPrefix
+                tpName <- asks $ var tpPrefix
                 pure [(tpName, tp)]
             ,
             combine = \_ tp' -> do
-                tpName <- var tpPrefix
-                tp <- recallS tpName
+                tpName <- asks $ var tpPrefix
+                tp <- ask >>= recallS tpName
                 tell [Constraint tp tp'] -- Unify type
                 pure tp -- Gives explicit type
         }
@@ -65,23 +66,26 @@ lambda inc (x, t) y = Branch (inc $ IntroFunc x) $ Binary t y
 apply :: (BasicFlag -> p) -> Term p -> Term p -> Term p
 apply inc f x = Branch (inc ElimFunc) $ Binary f x
 
-funcTFormer = Leaf $ Internal "TypeFunc" []
-pairTFormer = Leaf $ Internal "TypePair" []
+funcTFormer = Leaf $ Internal "Basics" ["TypeFunc"]
+pairTFormer = Leaf $ Internal "Basics" ["TypePair"]
 
 instance DomainedLocal BasicFlag where
     mInstance  = MInstance "Basics"
 
 instance FeatureGlImpl TypingIntern BasicFlag Void where
-    featureImplGl = TypingIntern $ \_ -> Left ["Unsupported"]
+    featureImplGl = TypingIntern typeOf where
+        typeOf ["TypeFunc"] = _typefunc
+        typeOf ["TypePair"] = _typePair
+        typeOf _ = Left ["IllegalArguments", "TypeFunc|TypePair"]
 
-instance (Context c) => FeatureElImpl (TypingWith c q) BasicFlag Void where
+instance FeatureElImpl (TypingWith q) BasicFlag Void where
     featureImplEl (IntroFunc param) = TypingWith $ do
         inc <- asks (. Local)
         pure $ Typing {
             bindType = \tpPar _ -> pure [(param, tpPar)]
             ,
             combine = \_ tpRet -> do
-                tpPar <- recallS param
+                tpPar <- ask >>= recallS param
                 pure $ apply inc funcTFormer $ lambda inc (param, tpPar) tpRet
         }
 
@@ -100,8 +104,8 @@ instance (Context c) => FeatureElImpl (TypingWith c q) BasicFlag Void where
             bindType = \_ _ -> pure []
             ,
             combine = \tpf tpx -> do
-                par <- var "p"
-                blk <- var "r"
+                par <- asks $ var "p"
+                blk <- asks $ var "r"
                 let tpRet = Leaf $ InRef blk
                 let tpf' = apply inc funcTFormer $ lambda inc (par, tpx) tpRet
                 tell [Constraint tpf tpf']
@@ -112,8 +116,8 @@ instance (Context c) => FeatureElImpl (TypingWith c q) BasicFlag Void where
         inc <- asks (. Local)
         pure $ Typing {
             bindType = \pair tpp -> do
-                tDep <- var "a"
-                tRest <- var "b"
+                tDep <- asks $ var "a"
+                tRest <- asks $ var "b"
                 let tpDep = Leaf $ InRef tDep
                 let tpRest = Leaf $ InRef tRest
                 let tpp' = apply inc pairTFormer $ lambda inc (p1, tpDep) tpRest

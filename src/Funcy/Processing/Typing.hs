@@ -29,17 +29,17 @@ import Funcy.Processing.Modules
                                                         Type-related Terms
 ------------------------------------------------------------------------------------------------------------------------------------}
 
-data Typing c p = Typing {
+data Typing p = Typing {
     -- Binding from the left side - first parameter is term, second is type
-    bindType :: Term p -> Term p -> Infer c p [(Binding, Term p)],
+    bindType :: Term p -> Term p -> Infer CtxProxy p [(Binding, Term p)],
 
     -- Combine two 'types'
-    combine :: Term p -> Term p -> Infer c p (Term p)
+    combine :: Term p -> Term p -> Infer CtxProxy p (Term p)
 }
 
-newtype TypingWith c q p = TypingWith { runTyper :: (p -> q) -> Typing c q } deriving Functor
+newtype TypingWith q p = TypingWith { runTyper :: (p -> q) -> Typing q } deriving Functor
 
-instance Expansive (TypingWith c q) where
+instance Expansive (TypingWith q) where
     expand inc = fmap $ wrap inc
 
 
@@ -71,10 +71,10 @@ data Side = LeftSide | RightSide
 
 class Context c where
     -- get (fresh) name from name supply within given context
-    getVar :: Binding -> c t -> Binding
+    getVar :: c t -> Binding -> Binding
 
     -- inspect type for certain name
-    inspect :: Binding -> c t -> Maybe t
+    inspect :: c t -> Binding -> Maybe t
 
     -- apply certain bounds
     applyBnd :: [(Binding, t)] -> c t -> c t
@@ -91,24 +91,29 @@ type Infer c p a =
             Identity)) a
 
 
-var :: (Context c) => Binding -> Infer c p Binding
-var ident = asks (getVar ident)
+asProxy :: (Context c) => c t -> CtxProxy t
+asProxy ctx = CtxProxy (getVar ctx) (inspect ctx)
 
-recall :: (Context c) => Binding -> Infer c p (Maybe (Term p))
-recall ref = asks (inspect ref)
 
--- Strict recall - causes error if not detected
-recallS :: (Context c) => Binding -> Infer c p (Term p)
-recallS ref = asks (inspect ref) >>= maybe (throwError "Internal Error") pure
+data CtxProxy t = CtxProxy (Binding -> Binding) (Binding -> Maybe t)
+
+var :: Binding -> CtxProxy t -> Binding
+var bnd (CtxProxy v _) = v bnd
+
+recall :: Binding -> CtxProxy t -> Maybe t
+recall bnd (CtxProxy _ r) = r bnd
+
+recallS :: Binding -> CtxProxy t -> Infer c p t
+recallS bnd = maybe (throwError "Internal Error") pure . recall bnd
 
 -- TODO: Formalize possible operations
 
 -- Infers type of each term
-infer :: (Context c, DomainedFeature TypingIntern p, ElementFeature (TypingWith c p) p) => Term p -> Infer c p (Term p)
+infer :: (Context c, DomainedFeature TypingIntern p, ElementFeature (TypingWith p) p) => Term p -> Infer c p (Term p)
 infer (Leaf r) = let referError = Leaf . Internal "ReferError" in
     case r of
         InRef ref -> do
-            refed <- asks $ inspect ref
+            refed <- asks inspect <&> ($ ref)
             pure $ fromMaybe (referError ["Binding", ref]) refed -- TODO: More detailed error
         Internal key other -> do
             let res = maybe (Left . (:) key) runIntern (findFeature key) other
@@ -116,13 +121,15 @@ infer (Leaf r) = let referError = Leaf . Internal "ReferError" in
 
 infer (Branch flag (Binary l r)) = do
     let subInfer side t = local (subContext side) $ infer t
+    let withProxy = mapExceptT $ withReaderT asProxy
     let typer = runTyper (featureOf flag) id
     ltype <- subInfer LeftSide l  -- Infer type of left term
-    bound <- bindType typer l ltype
+    bound <- withProxy $ bindType typer l ltype
     let updated = local (applyBnd bound)  -- Localize for obtained bounds
     rtype <- updated (subInfer RightSide r) -- Infer type of right term
-    updated $ combine typer ltype rtype -- Combine left and right type to obtain the whole type
+    updated $ withProxy $ combine typer ltype rtype -- Combine left and right type to obtain the whole type
 
+-- TODO Constraint solving
 
 -- Unified terms
 --type Unified t = (Known t, [Constraint t])
