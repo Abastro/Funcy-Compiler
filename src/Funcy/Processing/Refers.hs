@@ -32,9 +32,10 @@ refChain = Internal "Chain" []
 class MultiSugar p where
     type Desugar p
     -- Extract the Binding involved.
-    binding :: p -> Maybe Binding
+    binding :: p -> [Binding]
 
-    -- Interpret the flag, possibly with ID. Multiple one happens with cyclic references.
+    -- Interpret the flag, possibly with externally given ID.
+    -- Multiple one happens with cyclic references.
     interpret :: [Binding] -> p -> Desugar p
 
 
@@ -59,7 +60,7 @@ type Organize a = ReaderT Location (WriterT (Refer Location) Identity) a
                                                         Reference Organizing
 ------------------------------------------------------------------------------------------------------------------------------------}
 
--- Finds unbound references and Sorts referencs by referential order.
+-- Finds unbound references and Sorts references by referential order.
 -- Also converts multiple branch into binaries
 organizeRefs :: MultiSugar p => AST Multi p -> Organize (AST Binary (Desugar p))
 organizeRefs (Leaf (InRef ref)) = do
@@ -70,10 +71,12 @@ organizeRefs (Leaf (InRef ref)) = do
 organizeRefs (Leaf ref) = pure $ Leaf ref
 
 organizeRefs (Branch flag (Bi br)) = pass $ do
-    -- TODO: Localize location
-    br' <- traverse organizeRefs br -- Traverse over the branch, tracking references
+    br' <- traverse subCall $ tag br -- Traverse over the branch, tracking references
     pure (Branch (interpret [] flag) br', -- (Re-)attach flag
-        maybe id MapS.delete (binding flag)) -- Remove references to current binding
+        removeRefs $ binding flag) -- Remove references to current binding
+    where
+        tag (Binary l r) = Binary (LeftSide, l) (RightSide, r)
+        subCall (pos, br) = local (show pos :) $ organizeRefs br
 
 organizeRefs (Branch flag (Multi brs)) = pass $ do
     brs' <- traverse subCall brs -- Traverse over the branch, tracking references

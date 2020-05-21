@@ -38,6 +38,8 @@ instance FeatureGlImpl TypingIntern TypeFlag Void where
 instance FeatureElImpl (TypingWith q) TypeFlag Void where
     featureImplEl Typed = TypingWith $
         pure $ Typing {
+            ckEnclose = True
+            ,
             bindType = \tp _ -> do
                 tpName <- asks $ var tpPrefix
                 pure [(tpName, tp)]
@@ -74,7 +76,7 @@ instance DomainedLocal BasicFlag where
 
 instance FeatureGlImpl TypingIntern BasicFlag Void where
     featureImplGl = TypingIntern typeOf where
-        typeOf ["TypeFunc"] = _typefunc
+        typeOf ["TypeFunc"] = _typeFunc
         typeOf ["TypePair"] = _typePair
         typeOf _ = Left ["IllegalArguments", "TypeFunc|TypePair"]
 
@@ -82,6 +84,8 @@ instance FeatureElImpl (TypingWith q) BasicFlag Void where
     featureImplEl (IntroFunc param) = TypingWith $ do
         inc <- asks (. Local)
         pure $ Typing {
+            ckEnclose = True
+            ,
             bindType = \tpPar _ -> pure [(param, tpPar)]
             ,
             combine = \_ tpRet -> do
@@ -92,6 +96,9 @@ instance FeatureElImpl (TypingWith q) BasicFlag Void where
     featureImplEl (IntroPair dep) = TypingWith $ do
         inc <- asks (. Local)
         pure $ Typing {
+            -- May not enclose in some cases
+            ckEnclose = True
+            ,
             bindType = \_ tpDep -> pure [(dep, tpDep)]
             ,
             combine = \tpDep tpRest ->
@@ -101,6 +108,8 @@ instance FeatureElImpl (TypingWith q) BasicFlag Void where
     featureImplEl ElimFunc = TypingWith $ do
         inc <- asks (. Local)
         pure $ Typing {
+            ckEnclose = True
+            ,
             bindType = \_ _ -> pure []
             ,
             combine = \tpf tpx -> do
@@ -115,6 +124,8 @@ instance FeatureElImpl (TypingWith q) BasicFlag Void where
     featureImplEl (ElimPair p1 p2) = TypingWith $ do
         inc <- asks (. Local)
         pure $ Typing {
+            ckEnclose = True
+            ,
             bindType = \pair tpp -> do
                 tDep <- asks $ var "a"
                 tRest <- asks $ var "b"

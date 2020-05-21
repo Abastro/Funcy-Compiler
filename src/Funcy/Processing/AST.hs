@@ -14,6 +14,8 @@ instance Functor m => Functor (AST m) where
     fmap f (Leaf ref) = Leaf ref
     fmap f (Branch flag branch) = Branch (f flag) $ (fmap . fmap) f branch
 
+data Side = LeftSide | RightSide deriving Show
+
 
 -- Binding reference name
 type Binding = String
