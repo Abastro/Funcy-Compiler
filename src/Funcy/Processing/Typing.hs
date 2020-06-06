@@ -98,7 +98,6 @@ recallS :: Binding -> CtxProxy t -> Infer c [] p t
 recallS bnd = maybe (throwError "Internal Error") pure . recall bnd
 
 
--- TODO Construction of closures
 data Closure a = Singular a | Closure [Closure a]
 
 toClosure :: [a] -> Closure a
@@ -158,26 +157,39 @@ infer (Branch flag (Binary l r)) = pass $ do
                                                         Constraint Solving
 ------------------------------------------------------------------------------------------------------------------------------------}
 
-type Known t = MapL.Map Binding t
+-- Type environment
+type Env t = MapL.Map Binding t
 
--- TODO Constraint solving
+-- Substitutions
 type Subst t = MapL.Map Binding t
 
-type UnifyState t = [Constraint t]
+
+type UnifyState t = (Subst t, Closure (Constraint t))
 
 -- Denotes solving procedure
 type Solve p a =
     ExceptT String (
-        ReaderT (Known (Term p)) (
+        ReaderT (Env (Term p)) (
             StateT (UnifyState (Term p))
             Identity)) a
 
+-- TODO Unification search space
+-- TODO Consider binding specific to closure
+-- Solve
 solve :: Solve p (Subst (Term p))
 solve = do
-    cs <- get
+    (su, cs) <- get
     case cs of
-        [] -> ask
-        (con : cs0) -> do
-            (su1, cs1) <- _unify con
-            put (cs1 ++ (_apply su1 cs0))
-            local (_compose su1) solve
+        Singular con -> do
+            -- Unify and solve the constraint
+            (su', cs') <- _unify con
+            put (_compose su su', cs')
+            solve
+        Closure [] -> return su
+        Closure (cs0 : css) -> do
+            -- Solve for head constraints
+            put (su, cs0)
+            su' <- solve
+            -- Apply the constraints and substitutions
+            put (_compose su su', _apply su' css)
+            solve
