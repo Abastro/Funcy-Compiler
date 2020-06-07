@@ -30,14 +30,14 @@ import           Funcy.Processing.Modules
 ------------------------------------------------------------------------------------------------------------------------------------}
 
 data Typing p = Typing {
-    -- Check if this term forms closure
-    ckEnclose :: Bool
-    ,
-    -- Binding from the left side - first parameter is term, second is type
-    bindType :: Term p -> Term p -> Infer CtxProxy [] p [(Binding, Term p)]
-    ,
-    -- Combine two 'types'
-    combine :: Term p -> Term p -> Infer CtxProxy [] p (Term p)
+  -- Check if this term forms closure
+  ckEnclose :: Bool
+  ,
+  -- Binding from the left side - first parameter is term, second is type
+  bindType :: Term p -> Term p -> Infer CtxProxy [] p [(Binding, Term p)]
+  ,
+  -- Combine two 'types'
+  combine :: Term p -> Term p -> Infer CtxProxy [] p (Term p)
 }
 
 newtype TypingWith q p = TypingWith {
@@ -48,11 +48,11 @@ instance Expansive (TypingWith q) where
   expand inc = fmap $ wrap inc
 
 
-newtype TypingIntern p = TypingIntern {
-  runIntern :: [String] -> Either [String] (Term p)
+newtype TypingIntern q p = TypingIntern {
+  runIntern :: (p -> q) -> [String] -> Either [String] (Infer CtxProxy [] q (Term q))
 } deriving Functor
 
-instance Expansive TypingIntern where
+instance Expansive (TypingIntern q) where
   expand inc = fmap $ wrap inc
 
 -- Type analysis uses bibranch exclusively
@@ -70,22 +70,22 @@ Full equality / inference with implementation detals hidden
 
 -- Constaint t a b means a should unify with b under type t
 data Constraint t = Constraint {
-    termA :: t,
-    termB :: t
+  termA :: t,
+  termB :: t
 }
 
 class Context c where
-    -- get (fresh) name from name supply within given context
-    getVar :: c t -> Binding -> Binding
+  -- get (fresh) name from name supply within given context
+  getVar :: c t -> Binding -> Binding
 
-    -- inspect type for certain name
-    inspect :: c t -> Binding -> Maybe t
+  -- inspect type for certain name
+  inspect :: c t -> Binding -> Maybe t
 
-    -- apply certain bounds
-    applyBnd :: [(Binding, t)] -> c t -> c t
+  -- apply certain bounds
+  applyBnd :: [(Binding, t)] -> c t -> c t
 
-    -- get sub-context
-    subContext :: Side -> c t -> c t
+  -- get sub-context
+  subContext :: Side -> c t -> c t
 
 data CtxProxy t = CtxProxy (Binding -> Binding) (Binding -> Maybe t)
 
@@ -119,47 +119,49 @@ instance Monoid (Closure a) where
 
 -- Denotes inference procedure
 type Infer c w p a
-  = ExceptT
-      String
-      (ReaderT (c (Term p)) (WriterT (w (Constraint (Term p))) Identity))
+  = ExceptT String
+    (ReaderT (c (Term p))
+      (WriterT (w (Constraint (Term p))) Identity))
       a
+-- TODO How to elegantly hide these?
 
 
 -- Infers type of each term
 infer
   :: ( Context c
-     , DomainedFeature TypingIntern p
+     , DomainedFeature (TypingIntern p) p
      , ElementFeature (TypingWith p) p
      )
   => Term p
   -> Infer c Closure p (Term p)
-infer (Leaf r) =
-  let referError = Leaf . Internal "ReferError"
-  in  case r of -- This is problematic in case it's introduced later
-        InRef ref -> do
-          refed <- asks inspect <&> ($ ref)
-          pure $ fromMaybe (referError ["Binding", ref]) refed -- TODO: More detailed error
-        Internal key other -> do
-          let res = maybe (Left . (:) key) runIntern (findFeature key) other
-          pure $ either referError id res
+infer term = case term of
+  Leaf (InRef ref) -> do
+    refed <- asks inspect <&> ($ ref) -- This is problematic in case it's introduced later..
+    pure $ fromMaybe (referError ["Binding", ref]) refed -- TODO: More detailed error
 
-infer (Branch flag (Binary l r)) = pass $ do
-  let subInfer side t = local (subContext side) $ infer t
-  let withProxy   = mapExceptT . withReaderT $ asProxy
-  let fromListing = mapExceptT . mapReaderT . mapWriter . fmap $ toClosure
-  let applyLocal  = fromListing . withProxy
-  let typer       = runTyper (featureOf flag) id
-  let close       = if ckEnclose typer then Closure . (: []) else id
+  Leaf (Internal key other) -> do
+    let res = maybe (Left . (:) key) (($ id) . runIntern) (findFeature key) other
+    applyLocal $ either (pure . referError) id res
 
-  -- Infer type of left term, and obtain bindings
-  ltype <- subInfer LeftSide l
-  bound <- applyLocal $ bindType typer l ltype
-  let updated = local (applyBnd bound)  -- Localization for obtained bounds
+  Branch flag (Binary l r) -> pass $ do
+    let subInfer side t = local (subContext side) $ infer t
+    let typer       = runTyper (featureOf flag) id
+    let close       = if ckEnclose typer then Closure . (: []) else id
 
-  -- Infer type of right term
-  rtype <- updated $ subInfer RightSide r
-  tp    <- updated $ applyLocal $ combine typer ltype rtype -- Combine left and right type to obtain the whole type
-  return (tp, close)
+    -- Infer type of left term, and obtain bindings
+    ltype <- subInfer LeftSide l
+    bound <- applyLocal $ bindType typer l ltype
+    let updated = local (applyBnd bound)  -- Localization for obtained bounds
+
+    -- Infer type of right term
+    rtype <- updated $ subInfer RightSide r
+    tp    <- updated $ applyLocal $ combine typer ltype rtype -- Combine left and right type to obtain the whole type
+    return (tp, close)
+  where
+    referError = Leaf . Internal "ReferError"
+    withProxy   = mapExceptT . withReaderT $ asProxy
+    fromListing = mapExceptT . mapReaderT . mapWriter . fmap $ toClosure
+    applyLocal  = fromListing . withProxy
 
 {-----------------------------------------------------------------------------------------------------------------------------------
                                                         Constraint Solving

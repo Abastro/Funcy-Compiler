@@ -28,11 +28,11 @@ type UniType = ModuleType BasicFlag Void
 instance DomainedLocal TypeFlag where
   mInstance = MInstance "UType"
 
-instance FeatureGlImpl TypingIntern TypeFlag Void where
-  featureImplGl = TypingIntern typeOf   where
+instance FeatureGlImpl (TypingIntern q) TypeFlag Void where
+  featureImplGl = TypingIntern $ const typeOf   where
     illegalArguments = Left ["IllegalArguments", "[number]"]
     typeOf [num] =
-      Leaf . mkUni . (1 +) <$> maybe illegalArguments Right (readMaybe num)
+      pure . Leaf . mkUni . (1 +) <$> maybe illegalArguments Right (readMaybe num)
     typeOf _ = illegalArguments
 
 instance FeatureElImpl (TypingWith q) TypeFlag Void where
@@ -72,19 +72,24 @@ pairTFormer = Leaf $ Internal "Basics" ["TypePair"]
 fnType :: (BasicFlag -> p) -> Term p -> Term p -> Term p
 fnType inc a b = apply inc funcTFormer $ lambda inc ("#unused", a) b
 
-a >==> b = fnType Local a b
-
 instance DomainedLocal BasicFlag where
   mInstance = MInstance "Basics"
 
--- TODO This need to be better, allocating new names..
-instance FeatureGlImpl TypingIntern BasicFlag Void where
-  featureImplGl = TypingIntern typeOf   where
-    typeOf ["TypeFunc"] = Right $ (a >==> u) >==> u
-    typeOf ["TypePair"] = Right $ (a >==> u) >==> u
-    typeOf _            = Left ["IllegalArguments", "TypeFunc|TypePair"]
-    a = Leaf $ InRef "a"
-    u = Leaf $ InRef "u"
+instance FeatureGlImpl (TypingIntern q) BasicFlag Void where
+  featureImplGl = TypingIntern $ do
+    inc <- asks (. Local)
+    let (>==>) a b = fnType inc a b
+    let tpFormer = ( do
+        na <- asks $ var "a"
+        nu <- asks $ var "u"
+        let a = Leaf $ InRef na
+        let u = Leaf $ InRef nu -- TODO a should be lower than uni type u, constraint
+        pure $ (a >==> u) >==> u )
+    pure $ (fmap . fmap) (const tpFormer) typeOf
+    where
+      fitsIn x = x == "TypeFunc" || x == "TypePair"
+      typeOf [x] | fitsIn x = Right ()
+      typeOf _              = Left ["IllegalArguments", "TypeFunc|TypePair"]
 
 instance FeatureElImpl (TypingWith q) BasicFlag Void where
   featureImplEl (IntroFunc param) = TypingWith $ do
