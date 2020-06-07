@@ -11,8 +11,8 @@ data AST m p = Leaf Reference | Branch p (m (AST m p))
 data Binary t = Binary t t deriving (Functor, Foldable, Traversable)
 
 instance Functor m => Functor (AST m) where
-    fmap f (Leaf ref) = Leaf ref
-    fmap f (Branch flag branch) = Branch (f flag) $ (fmap . fmap) f branch
+  fmap f (Leaf ref) = Leaf ref
+  fmap f (Branch flag branch) = Branch (f flag) $ (fmap . fmap) f branch
 
 data Side = LeftSide | RightSide deriving Show
 

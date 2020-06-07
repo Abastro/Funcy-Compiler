@@ -1,21 +1,21 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 module Funcy.Processing.Structure where
 
-import Control.Monad.Reader
-import Control.Monad.Writer
-import Control.Monad.Except
+import           Control.Monad.Reader
+import           Control.Monad.Writer
+import           Control.Monad.Except
 
-import Data.Void
-import Data.Functor
+import           Data.Void
+import           Data.Functor
 
-import Text.Read
+import           Text.Read
 
-import Funcy.Processing.AST
-import Funcy.Processing.Modules
-import Funcy.Processing.Typing
+import           Funcy.Processing.AST
+import           Funcy.Processing.Modules
+import           Funcy.Processing.Typing
 
 data TypeFlag =
-    Typed -- t2 : t1 (t2 has type t1)
+  Typed -- t2 : t1 (t2 has type t1)
 
 
 mkUni :: Int -> Reference
@@ -26,30 +26,27 @@ tpPrefix = "force_"
 type UniType = ModuleType BasicFlag Void
 
 instance DomainedLocal TypeFlag where
-    mInstance = MInstance "UType"
+  mInstance = MInstance "UType"
 
 instance FeatureGlImpl TypingIntern TypeFlag Void where
-    featureImplGl = TypingIntern typeOf where
-        illegalArguments = Left ["IllegalArguments", "[number]"]
-        typeOf [num] = Leaf . mkUni . (1+) <$>
-            maybe illegalArguments Right (readMaybe num)
-        typeOf _ = illegalArguments
+  featureImplGl = TypingIntern typeOf   where
+    illegalArguments = Left ["IllegalArguments", "[number]"]
+    typeOf [num] =
+      Leaf . mkUni . (1 +) <$> maybe illegalArguments Right (readMaybe num)
+    typeOf _ = illegalArguments
 
 instance FeatureElImpl (TypingWith q) TypeFlag Void where
-    featureImplEl Typed = TypingWith $
-        pure $ Typing {
-            ckEnclose = True
-            ,
-            bindType = \tp _ -> do
-                tpName <- asks $ var tpPrefix
-                pure [(tpName, tp)]
-            ,
-            combine = \_ tp' -> do
-                tpName <- asks $ var tpPrefix
-                tp <- ask >>= recallS tpName
-                tell [Constraint tp tp'] -- Unify type
-                pure tp -- Gives explicit type
-        }
+  featureImplEl Typed = TypingWith $ pure $ Typing
+    { ckEnclose = True
+    , bindType  = \tp _ -> do
+                    tpName <- asks $ var tpPrefix
+                    pure [(tpName, tp)]
+    , combine   = \_ tp' -> do
+                    tpName <- asks $ var tpPrefix
+                    tp     <- ask >>= recallS tpName
+                    tell [Constraint tp tp'] -- Unify type
+                    pure tp -- Gives explicit type
+    }
 
 
 data BasicFlag =
@@ -71,70 +68,74 @@ apply inc f x = Branch (inc ElimFunc) $ Binary f x
 funcTFormer = Leaf $ Internal "Basics" ["TypeFunc"]
 pairTFormer = Leaf $ Internal "Basics" ["TypePair"]
 
-instance DomainedLocal BasicFlag where
-    mInstance  = MInstance "Basics"
+-- Basic function type
+fnType :: (BasicFlag -> p) -> Term p -> Term p -> Term p
+fnType inc a b = apply inc funcTFormer $ lambda inc ("#unused", a) b
 
+a >==> b = fnType Local a b
+
+instance DomainedLocal BasicFlag where
+  mInstance = MInstance "Basics"
+
+-- TODO This need to be better, allocating new names..
 instance FeatureGlImpl TypingIntern BasicFlag Void where
-    featureImplGl = TypingIntern typeOf where
-        typeOf ["TypeFunc"] = _typeFunc
-        typeOf ["TypePair"] = _typePair
-        typeOf _ = Left ["IllegalArguments", "TypeFunc|TypePair"]
+  featureImplGl = TypingIntern typeOf   where
+    typeOf ["TypeFunc"] = Right $ (a >==> u) >==> u
+    typeOf ["TypePair"] = Right $ (a >==> u) >==> u
+    typeOf _            = Left ["IllegalArguments", "TypeFunc|TypePair"]
+    a = Leaf $ InRef "a"
+    u = Leaf $ InRef "u"
 
 instance FeatureElImpl (TypingWith q) BasicFlag Void where
-    featureImplEl (IntroFunc param) = TypingWith $ do
-        inc <- asks (. Local)
-        pure $ Typing {
-            ckEnclose = True
-            ,
-            bindType = \tpPar _ -> pure [(param, tpPar)]
-            ,
-            combine = \_ tpRet -> do
-                tpPar <- ask >>= recallS param
-                pure $ apply inc funcTFormer $ lambda inc (param, tpPar) tpRet
-        }
+  featureImplEl (IntroFunc param) = TypingWith $ do
+    inc <- asks (. Local)
+    pure $ Typing
+      { ckEnclose = True
+      , bindType  = \tpPar _ -> pure [(param, tpPar)]
+      , combine   = \_ tpRet -> do
+                      tpPar <- ask >>= recallS param
+                      pure $ apply inc funcTFormer $ lambda inc
+                                                            (param, tpPar)
+                                                            tpRet
+      }
 
-    featureImplEl (IntroPair dep) = TypingWith $ do
-        inc <- asks (. Local)
-        pure $ Typing {
-            -- May not enclose in some cases
-            ckEnclose = True
-            ,
-            bindType = \_ tpDep -> pure [(dep, tpDep)]
-            ,
-            combine = \tpDep tpRest ->
-                pure $ apply inc pairTFormer $ lambda inc (dep, tpDep) tpRest
-        }
+  featureImplEl (IntroPair dep) = TypingWith $ do
+    inc <- asks (. Local)
+    pure $ Typing
+      {
+        -- May not enclose in some cases
+        ckEnclose = True
+      , bindType  = \_ tpDep -> pure [(dep, tpDep)]
+      , combine   = \tpDep tpRest ->
+        pure $ apply inc pairTFormer $ lambda inc (dep, tpDep) tpRest
+      }
 
-    featureImplEl ElimFunc = TypingWith $ do
-        inc <- asks (. Local)
-        pure $ Typing {
-            ckEnclose = True
-            ,
-            bindType = \_ _ -> pure []
-            ,
-            combine = \tpf tpx -> do
-                par <- asks $ var "p"
-                blk <- asks $ var "r"
-                let tpRet = Leaf $ InRef blk
-                let tpf' = apply inc funcTFormer $ lambda inc (par, tpx) tpRet
-                tell [Constraint tpf tpf']
-                pure tpRet
-        }
+  featureImplEl ElimFunc = TypingWith $ do
+    inc <- asks (. Local)
+    pure $ Typing
+      { ckEnclose = True
+      , bindType  = \_ _ -> pure []
+      , combine   = \tpf tpx -> do
+        par <- asks $ var "p"
+        blk <- asks $ var "r"
+        let tpRet = Leaf $ InRef blk
+        let tpf' = apply inc funcTFormer $ lambda inc (par, tpx) tpRet
+        tell [Constraint tpf tpf']
+        pure tpRet
+      }
 
-    featureImplEl (ElimPair p1 p2) = TypingWith $ do
-        inc <- asks (. Local)
-        pure $ Typing {
-            ckEnclose = True
-            ,
-            bindType = \pair tpp -> do
-                tDep <- asks $ var "a"
-                tRest <- asks $ var "b"
-                let tpDep = Leaf $ InRef tDep
-                let tpRest = Leaf $ InRef tRest
-                let tpp' = apply inc pairTFormer $ lambda inc (p1, tpDep) tpRest
+  featureImplEl (ElimPair p1 p2) = TypingWith $ do
+    inc <- asks (. Local)
+    pure $ Typing
+      { ckEnclose = True
+      , bindType  = \pair tpp -> do
+        tDep  <- asks $ var "a"
+        tRest <- asks $ var "b"
+        let tpDep  = Leaf $ InRef tDep
+        let tpRest = Leaf $ InRef tRest
+        let tpp' = apply inc pairTFormer $ lambda inc (p1, tpDep) tpRest
 
-                tell [Constraint tpp tpp']
-                pure [(p1, tpDep), (p2, tpRest)]
-            ,
-            combine = \_ tpe -> pure tpe
-        }
+        tell [Constraint tpp tpp']
+        pure [(p1, tpDep), (p2, tpRest)]
+      , combine   = \_ tpe -> pure tpe
+      }
