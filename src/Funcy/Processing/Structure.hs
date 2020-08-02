@@ -68,7 +68,7 @@ apply inc f x = Branch (inc ElimFunc) $ Binary f x
 funcTFormer = Leaf $ Internal "Basics" ["TypeFunc"]
 pairTFormer = Leaf $ Internal "Basics" ["TypePair"]
 
--- Basic function type
+-- |Basic function type
 fnType :: (BasicFlag -> p) -> Term p -> Term p -> Term p
 fnType inc a b = apply inc funcTFormer $ lambda inc ("#unused", a) b
 
@@ -83,7 +83,7 @@ instance FeatureGlImpl (TypingIntern q) BasicFlag Void where
         na <- asks $ var "a"
         nu <- asks $ var "u"
         let a = Leaf $ InRef na
-        let u = Leaf $ InRef nu -- TODO a should be lower than uni type u, constraint
+        let u = Leaf $ InRef nu
         pure $ (a >==> u) >==> u )
     pure $ (fmap . fmap) (const tpFormer) typeOf
     where
@@ -98,17 +98,15 @@ instance FeatureElImpl (TypingWith q) BasicFlag Void where
       { ckEnclose = True
       , bindType  = \tpPar _ -> pure [(param, tpPar)]
       , combine   = \_ tpRet -> do
-                      tpPar <- ask >>= recallS param
-                      pure $ apply inc funcTFormer $ lambda inc
-                                                            (param, tpPar)
-                                                            tpRet
+        tpPar <- ask >>= recallS param
+        pure $ apply inc funcTFormer $ lambda inc (param, tpPar) tpRet
       }
 
   featureImplEl (IntroPair dep) = TypingWith $ do
     inc <- asks (. Local)
     pure $ Typing
       {
-        -- May not enclose in some cases
+        -- TODO May not enclose in some cases
         ckEnclose = True
       , bindType  = \_ tpDep -> pure [(dep, tpDep)]
       , combine   = \tpDep tpRest ->
@@ -119,7 +117,7 @@ instance FeatureElImpl (TypingWith q) BasicFlag Void where
     inc <- asks (. Local)
     pure $ Typing
       { ckEnclose = True
-      , bindType  = \_ _ -> pure []
+      , bindType  = const . const $ pure []
       , combine   = \tpf tpx -> do
         par <- asks $ var "p"
         blk <- asks $ var "r"
@@ -142,5 +140,5 @@ instance FeatureElImpl (TypingWith q) BasicFlag Void where
 
         tell [Constraint tpp tpp']
         pure [(p1, tpDep), (p2, tpRest)]
-      , combine   = \_ tpe -> pure tpe
+      , combine   = const . pure
       }

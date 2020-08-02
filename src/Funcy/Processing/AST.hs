@@ -17,7 +17,7 @@ instance Functor m => Functor (AST m) where
 data Side = LeftSide | RightSide deriving Show
 
 
--- Binding reference name
+-- |Binding reference name
 type Binding = String
 
 

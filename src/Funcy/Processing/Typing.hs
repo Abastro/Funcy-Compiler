@@ -1,3 +1,4 @@
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -26,17 +27,17 @@ import           Funcy.Processing.AST
 import           Funcy.Processing.Modules
 
 {-----------------------------------------------------------------------------------------------------------------------------------
-                                                        Type-related Terms
+                                                        Type-related Data
 ------------------------------------------------------------------------------------------------------------------------------------}
 
 data Typing p = Typing {
-  -- Check if this term forms closure
+  -- |Check if this term forms closure
   ckEnclose :: Bool
   ,
-  -- Binding from the left side - first parameter is term, second is type
+  -- |Binding from the left side - first parameter is term, second is type
   bindType :: Term p -> Term p -> Infer CtxProxy [] p [(Binding, Term p)]
   ,
-  -- Combine two 'types'
+  -- |Combine two 'types'
   combine :: Term p -> Term p -> Infer CtxProxy [] p (Term p)
 }
 
@@ -55,8 +56,9 @@ newtype TypingIntern q p = TypingIntern {
 instance Expansive (TypingIntern q) where
   expand inc = fmap $ wrap inc
 
--- Type analysis uses bibranch exclusively
+-- |Type analysis uses bibranch exclusively
 type Term = AST Binary
+
 
 {-----------------------------------------------------------------------------------------------------------------------------------
                                                         Typing & Inference
@@ -68,23 +70,23 @@ Full equality / inference with implementation detals hidden
 -}
 
 
--- Constaint t a b means a should unify with b under type t
+-- |Constaint t a b means a should unify with b under type t
 data Constraint t = Constraint {
   termA :: t,
   termB :: t
 }
 
 class Context c where
-  -- get (fresh) name from name supply within given context
+  -- |get (fresh) name from name supply within given context
   getVar :: c t -> Binding -> Binding
 
-  -- inspect type for certain name
+  -- |inspect type for certain name
   inspect :: c t -> Binding -> Maybe t
 
-  -- apply certain bounds
+  -- |apply certain bounds
   applyBnd :: [(Binding, t)] -> c t -> c t
 
-  -- get sub-context
+  -- |get sub-context
   subContext :: Side -> c t -> c t
 
 data CtxProxy t = CtxProxy (Binding -> Binding) (Binding -> Maybe t)
@@ -102,90 +104,95 @@ recallS :: Binding -> CtxProxy t -> Infer c [] p t
 recallS bnd = maybe (throwError "Internal Error") pure . recall bnd
 
 
-data Closure a = Singular a | Closure [Closure a]
+-- |Closure with given environment (types for variable)
+data Closure e a = Singular a | Closure e [Closure e a]
 
-toClosure :: [a] -> Closure a
-toClosure = Closure . fmap Singular
+-- |Create closure from a list of terms
+listToClosure :: Monoid e => [a] -> Closure e a
+listToClosure = Closure mempty . fmap Singular
+
+singularClosure :: Monoid e => Closure e a -> Closure e a
+singularClosure = Closure mempty . (: [])
+
+-- |Combines the two closure along with environment
+instance Monoid e => Semigroup (Closure e a) where
+  (Closure e m) <> (Closure e' n) = Closure (e <> e') (m <> n)
+  m             <> (Closure e n)  = Closure e (m : n)
+  m             <> n              = Closure mempty [m] <> n
+
+instance Monoid e => Monoid (Closure e a) where
+  mempty = Closure mempty []
 
 
-instance Semigroup (Closure a) where
-  (Closure m) <> (Closure n) = Closure (m ++ n)
-  m           <> Closure n   = Closure (m : n)
-  m           <> n           = m <> Closure [n]
-
-instance Monoid (Closure a) where
-  mempty = Closure []
-
-
--- Denotes inference procedure
+-- |Denotes inference procedure
 type Infer c w p a
   = ExceptT String
     (ReaderT (c (Term p))
       (WriterT (w (Constraint (Term p))) Identity))
       a
--- TODO How to elegantly hide these?
 
-
--- Infers type of each term
-infer
-  :: ( Context c
+-- |Infers type of each term
+infer :: ( Context c
      , DomainedFeature (TypingIntern p) p
-     , ElementFeature (TypingWith p) p
-     )
+     , ElementFeature (TypingWith p) p )
   => Term p
-  -> Infer c Closure p (Term p)
+  -> Infer c (Closure ()) p (Term p)
 infer term = case term of
-  Leaf (InRef ref) -> do
-    refed <- asks inspect <&> ($ ref) -- This is problematic in case it's introduced later..
+  Leaf (InRef ref)          -> do
+    refed <- asks inspect <&> ($ ref) -- TODO: Consider cross reference
     pure $ fromMaybe (referError ["Binding", ref]) refed -- TODO: More detailed error
 
   Leaf (Internal key other) -> do
     let res = maybe (Left . (:) key) (($ id) . runIntern) (findFeature key) other
     applyLocal $ either (pure . referError) id res
 
-  Branch flag (Binary l r) -> pass $ do
+  Branch flag (Binary l r)  -> pass $ do
     let subInfer side t = local (subContext side) $ infer t
-    let typer       = runTyper (featureOf flag) id
-    let close       = if ckEnclose typer then Closure . (: []) else id
+    let typer           = runTyper (featureOf flag) id
+    let close           = if ckEnclose typer then singularClosure else id
 
     -- Infer type of left term, and obtain bindings
     ltype <- subInfer LeftSide l
     bound <- applyLocal $ bindType typer l ltype
-    let updated = local (applyBnd bound)  -- Localization for obtained bounds
+    let updated = local (applyBnd bound) . censor (encloseTerm bound) -- Localization for obtained bounds
 
     -- Infer type of right term
-    rtype <- updated $ subInfer RightSide r
+    rtype <- updated $ subInfer RightSide r -- TODO need to give binding info for child closures
     tp    <- updated $ applyLocal $ combine typer ltype rtype -- Combine left and right type to obtain the whole type
-    return (tp, close)
+    pure (tp, close)
   where
-    referError = Leaf . Internal "ReferError"
+    referError  = Leaf . Internal "ReferError"
     withProxy   = mapExceptT . withReaderT $ asProxy
-    fromListing = mapExceptT . mapReaderT . mapWriter . fmap $ toClosure
+    fromListing = mapExceptT . mapReaderT . mapWriter . fmap $ listToClosure
     applyLocal  = fromListing . withProxy
+    bindingTerm :: [(Binding, Term p)] -> () -- Temporary
+    bindingTerm = \bnds -> error "Bindings" bnds
+    encloseTerm = \bnds -> singularClosure . (Closure (bindingTerm bnds) [] <>)
+
 
 {-----------------------------------------------------------------------------------------------------------------------------------
                                                         Constraint Solving
 ------------------------------------------------------------------------------------------------------------------------------------}
 
--- Type environment
+-- |Environment
 type Env t = MapL.Map Binding t
 
--- Substitutions
+-- |Substitutions
 type Subst t = MapL.Map Binding t
 
 
-type UnifyState t = (Subst t, Closure (Constraint t))
+type UnifyState t = (Subst t, Closure (Env t) (Constraint t))
 
--- Denotes solving procedure
+-- |Denotes solving procedure
 type Solve p a
   = ExceptT
       String
-      (ReaderT (Env (Term p)) (StateT (UnifyState (Term p)) Identity))
+      (StateT (UnifyState (Term p)) Identity)
       a
 
--- TODO Unification search space
+-- TODO Unification search space (Proof Dictionary) - Accumulative
 -- TODO Consider binding specific to closure
--- Solve
+-- |Solve
 solve :: Solve p (Subst (Term p))
 solve = do
   (su, cs) <- get
@@ -195,8 +202,8 @@ solve = do
       (su', cs') <- unify con
       put (compose su su', cs')
       solve
-    Closure []          -> return su
-    Closure (cs0 : css) -> do
+    Closure _ []          -> return su
+    Closure _ (cs0 : css) -> do
         -- Solve for head constraints
       put (su, cs0)
       su' <- solve
@@ -205,13 +212,13 @@ solve = do
       solve
 
 unify :: Constraint (Term p) -> Solve p (UnifyState (Term p))
-unify = undefined
+unify = error "unify"
 
 compose :: Subst (Term p) -> Subst (Term p) -> Subst (Term p)
-compose = undefined
+compose = error "compose"
 
 applySubst
   :: Subst (Term p)
-  -> [Closure (Constraint (Term p))]
-  -> Closure (Constraint (Term p))
-applySubst = undefined
+  -> [Closure e (Constraint (Term p))]
+  -> Closure e (Constraint (Term p))
+applySubst = error "applySubst"

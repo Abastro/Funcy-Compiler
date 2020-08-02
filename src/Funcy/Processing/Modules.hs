@@ -23,7 +23,7 @@ import GHC.Generics
 
 import Text.Printf
 
--- Inclusion type, to represent inclusion relationship
+-- |Inclusion type, to represent inclusion relationship
 data Include p c = Inclusion {
   wrap :: c -> p,
   unwrap :: p -> Maybe c
@@ -34,12 +34,13 @@ type p :>: c = Include p c
 idIn :: a :>: a
 idIn = Inclusion id Just
 
-composeIn :: b :>: c -> a :>: b -> a :>: c
+composeIn :: (b :>: c) -> (a :>: b) -> a :>: c
 composeIn i j = Inclusion {
   wrap = wrap j . wrap i,
   unwrap = unwrap j >=> unwrap i
 }
 
+(>.>) :: (b :>: c) -> (a :>: b) -> a :>: c
 (>.>) = composeIn
 
 bijection :: (a -> b) -> (b -> a) -> b :>: a
@@ -57,13 +58,13 @@ rightIn = Inclusion {
 }
 
 
--- Expansive features which can applied to parents
+-- |Expansive features which can applied to parents
 class Expansive f where
   expand :: Include p c -> f c -> f p
 
 
--- A type which can represent all types a module requires
--- Type dep consists of the direct dependency module types
+-- |A type which can represent all types a module requires
+-- |Type dep consists of the direct dependency module types
 data ModuleType loc dep = Dep dep | Local loc
 
 depIn :: ModuleType loc dep :>: dep
@@ -78,22 +79,22 @@ localIn = Inclusion {
   unwrap = \case Local l -> Just l; _ -> Nothing
 }
 
--- Domain which specifies the module
+-- |Domain which specifies the module
 type Domain = String
 
--- Set of direct dependencies
+-- |Set of direct dependencies
 type DirectDeps = Set.Set Domain
 
--- Mapping which maps each indirect dependency module to specific direct dependency module which is dependent to the indirect module.
+-- |Mapping which maps each indirect dependency module to specific direct dependency module which is dependent to the indirect module.
 type DepDistrib = Map.Map Domain Domain
 
--- Dependencies for moduloid m. Here m represents the sum type of supported types.
+-- |Dependencies for moduloid m. Here m represents the sum type of supported types.
 data Dependencies dep = DepInfo DirectDeps DepDistrib deriving Functor
 instance Show (Dependencies dep) where
   show (DepInfo deps _) = printf "Depends on %s" $ show $ Set.toList deps
 
 
--- Group of modules with dependencies
+-- |Group of modules with dependencies
 class ModuleGroup t where
   dependencies :: Dependencies t
 
@@ -123,12 +124,12 @@ instance (ModuleGroup' f, ModuleGroup' g) => ModuleGroup' (f :+: g) where
 
 instance ModuleGroup Void
 
--- Representation of domain for local type for each module
+-- |Representation of domain for local type for each module
 newtype ModuleDomain loc = MInstance Domain deriving Show
 class DomainedLocal loc where
   mInstance :: ModuleDomain loc
 
--- Module group for single module
+-- |Module group for single module
 instance (DomainedLocal loc, ModuleGroup dep) => ModuleGroup (ModuleType loc dep) where
   dependencies = createDep dependencies mInstance where
     createDep :: Dependencies dep -> ModuleDomain loc -> Dependencies (ModuleType loc dep)
@@ -136,7 +137,7 @@ instance (DomainedLocal loc, ModuleGroup dep) => ModuleGroup (ModuleType loc dep
       $ Map.unions $ flip Map.singleton domain <$> depDist -- each element into the domain
 
 
--- Element-specific feature - Use generic deriving
+-- |Element-specific feature - Use generic deriving
 class (Expansive f) => ElementFeature f t where
   featureOf :: t -> f t
 
@@ -162,8 +163,8 @@ instance (ElementFeature' i f, ElementFeature' i g) => ElementFeature' i (f :+: 
 instance (Expansive f) => ElementFeature f Void
 
 
--- Feature extraction from certain domain - Use generic deriving
--- Searches more efficiently via immediately calculating which route to go for
+-- |Feature extraction from certain domain - Use generic deriving
+-- |Searches more efficiently via immediately calculating which route to go for
 class (Expansive f, ModuleGroup t) => DomainedFeature f t where
   findFeature :: Domain -> Maybe (f t)
 
@@ -200,7 +201,7 @@ instance (DomainedFeature' i f, DomainedFeature' i g) => DomainedFeature' i (f :
 instance (Expansive f) => DomainedFeature f Void
 
 
--- Actual implementation of element-specific feature for individual module
+-- |Actual implementation of element-specific feature for individual module
 class (Expansive f, DomainedLocal loc) => FeatureElImpl f loc dep where
   featureImplEl :: loc -> f (ModuleType loc dep)
 
@@ -209,14 +210,14 @@ instance (DomainedLocal loc, FeatureElImpl f loc dep, ElementFeature f dep) => E
     Dep el -> expand depIn $ featureOf el
     Local el -> featureImplEl el
 
--- Actual implementation of global feature for individual module.
--- This should be implemented to search feature using domain.
+-- |Actual implementation of global feature for individual module.
+-- |This should be implemented to search feature using domain.
 class (Expansive f, DomainedLocal loc) => FeatureGlImpl f loc dep where
   featureImplGl :: f (ModuleType loc dep)
 
 instance (FeatureGlImpl f loc dep, DomainedFeature f dep) => DomainedFeature f (ModuleType loc dep) where
   findFeature domain = featureInModule domain mInstance
-    <|> expand depIn <$> findFeature domain -- Not here
+    <|> expand depIn <$> findFeature domain -- It isn't here
     where
       featureInModule :: FeatureGlImpl f loc dep => Domain -> ModuleDomain loc -> Maybe (f (ModuleType loc dep))
       featureInModule domain (MInstance domM) = if domain == domM then Just featureImplGl else Nothing
