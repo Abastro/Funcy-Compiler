@@ -1,4 +1,3 @@
-{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -25,6 +24,7 @@ import qualified Data.Map.Lazy                 as MapL
 
 import           Funcy.Processing.AST
 import           Funcy.Processing.Modules
+import           Funcy.Processing.Message
 
 {-----------------------------------------------------------------------------------------------------------------------------------
                                                         Type-related Data
@@ -41,6 +41,7 @@ data Typing p = Typing {
   combine :: Term p -> Term p -> Infer CtxProxy [] p (Term p)
 }
 
+-- |Typing of certain term
 newtype TypingWith q p = TypingWith {
   runTyper :: (p -> q) -> Typing q
 } deriving Functor
@@ -49,8 +50,9 @@ instance Expansive (TypingWith q) where
   expand inc = fmap $ wrap inc
 
 
+-- |Internal Typing
 newtype TypingIntern q p = TypingIntern {
-  runIntern :: (p -> q) -> [String] -> Either [String] (Infer CtxProxy [] q (Term q))
+  runIntern :: (p -> q) -> [Binding] -> ProcError (Infer CtxProxy [] q (Term q))
 } deriving Functor
 
 instance Expansive (TypingIntern q) where
@@ -70,7 +72,7 @@ Full equality / inference with implementation detals hidden
 -}
 
 
--- |Constaint t a b means a should unify with b under type t
+-- |Constaint for unification
 data Constraint t = Constraint {
   termA :: t,
   termB :: t
@@ -104,39 +106,31 @@ recallS :: Binding -> CtxProxy t -> Infer c [] p t
 recallS bnd = maybe (throwError "Internal Error") pure . recall bnd
 
 
--- |Closure with given environment (types for variable)
-data Closure e a = Singular a | Closure e [Closure e a]
 
--- |Create closure from a list of terms
-listToClosure :: Monoid e => [a] -> Closure e a
-listToClosure = Closure mempty . fmap Singular
+-- |Environment
+type Env t = MapL.Map Binding t
+type Env' = ()
 
-singularClosure :: Monoid e => Closure e a -> Closure e a
-singularClosure = Closure mempty . (: [])
-
--- |Combines the two closure along with environment
-instance Monoid e => Semigroup (Closure e a) where
-  (Closure e m) <> (Closure e' n) = Closure (e <> e') (m <> n)
-  m             <> (Closure e n)  = Closure e (m : n)
-  m             <> n              = Closure mempty [m] <> n
-
-instance Monoid e => Monoid (Closure e a) where
-  mempty = Closure mempty []
+listToEnv :: [(Binding, Term p)] -> Env'
+listToEnv = error "formEnvironment"
 
 
 -- |Denotes inference procedure
-type Infer c w p a
+type Infer c w p
   = ExceptT String
     (ReaderT (c (Term p))
-      (WriterT (w (Constraint (Term p))) Identity))
-      a
+    (WriterT (w (Constraint (Term p)))
+    Identity))
 
+
+-- TODO Consider the case where flag is ignored
+-- TODO Why look for bound variables in inference process?
 -- |Infers type of each term
 infer :: ( Context c
      , DomainedFeature (TypingIntern p) p
      , ElementFeature (TypingWith p) p )
   => Term p
-  -> Infer c (Closure ()) p (Term p)
+  -> Infer c (Closure Env') p (Term p)
 infer term = case term of
   Leaf (InRef ref)          -> do
     refed <- asks inspect <&> ($ ref) -- TODO: Consider cross reference
@@ -149,7 +143,7 @@ infer term = case term of
   Branch flag (Binary l r)  -> pass $ do
     let subInfer side t = local (subContext side) $ infer t
     let typer           = runTyper (featureOf flag) id
-    let close           = if ckEnclose typer then singularClosure else id
+    let close           = if ckEnclose typer then enclose else id
 
     -- Infer type of left term, and obtain bindings
     ltype <- subInfer LeftSide l
@@ -165,17 +159,13 @@ infer term = case term of
     withProxy   = mapExceptT . withReaderT $ asProxy
     fromListing = mapExceptT . mapReaderT . mapWriter . fmap $ listToClosure
     applyLocal  = fromListing . withProxy
-    bindingTerm :: [(Binding, Term p)] -> () -- Temporary
-    bindingTerm = \bnds -> error "Bindings" bnds
-    encloseTerm = \bnds -> singularClosure . (Closure (bindingTerm bnds) [] <>)
+    -- Adds environment and enclose to merge
+    encloseTerm = \bnds -> enclose . (Closure (listToEnv bnds) [] <>)
 
 
 {-----------------------------------------------------------------------------------------------------------------------------------
                                                         Constraint Solving
 ------------------------------------------------------------------------------------------------------------------------------------}
-
--- |Environment
-type Env t = MapL.Map Binding t
 
 -- |Substitutions
 type Subst t = MapL.Map Binding t
@@ -190,7 +180,7 @@ type Solve p a
       (StateT (UnifyState (Term p)) Identity)
       a
 
--- TODO Unification search space (Proof Dictionary) - Accumulative
+-- TODO Unification search space (Proof Dictionary) - Accumulative 
 -- TODO Consider binding specific to closure
 -- |Solve
 solve :: Solve p (Subst (Term p))
@@ -204,7 +194,7 @@ solve = do
       solve
     Closure _ []          -> return su
     Closure _ (cs0 : css) -> do
-        -- Solve for head constraints
+      -- Solve for head constraints
       put (su, cs0)
       su' <- solve
       -- Apply the constraints and substitutions

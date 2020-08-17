@@ -13,6 +13,8 @@ import           Text.Read
 import           Funcy.Processing.AST
 import           Funcy.Processing.Modules
 import           Funcy.Processing.Typing
+import           Funcy.Processing.Message
+
 
 data TypeFlag =
   Typed -- t2 : t1 (t2 has type t1)
@@ -23,17 +25,18 @@ mkUni num = Internal "UType" [show num]
 
 tpPrefix = "force_"
 
-type UniType = ModuleType BasicFlag Void
+-- |Module for universe type
+type UniType = ModuleType TypeFlag Void
 
 instance DomainedLocal TypeFlag where
   mInstance = MInstance "UType"
 
 instance FeatureGlImpl (TypingIntern q) TypeFlag Void where
-  featureImplGl = TypingIntern $ const typeOf   where
-    illegalArguments = Left ["IllegalArguments", "[number]"]
+  featureImplGl = TypingIntern $ const typeOf where
+    error = illegalArg "[number]"
     typeOf [num] =
-      pure . Leaf . mkUni . (1 +) <$> maybe illegalArguments Right (readMaybe num)
-    typeOf _ = illegalArguments
+      pure . Leaf . mkUni . (1 +) <$> maybe error Right (readMaybe num)
+    typeOf _ = error
 
 instance FeatureElImpl (TypingWith q) TypeFlag Void where
   featureImplEl Typed = TypingWith $ pure $ Typing
@@ -78,7 +81,7 @@ instance DomainedLocal BasicFlag where
 instance FeatureGlImpl (TypingIntern q) BasicFlag Void where
   featureImplGl = TypingIntern $ do
     inc <- asks (. Local)
-    let (>==>) a b = fnType inc a b
+    let (>==>) = fnType inc
     let tpFormer = ( do
         na <- asks $ var "a"
         nu <- asks $ var "u"
@@ -89,7 +92,7 @@ instance FeatureGlImpl (TypingIntern q) BasicFlag Void where
     where
       fitsIn x = x == "TypeFunc" || x == "TypePair"
       typeOf [x] | fitsIn x = Right ()
-      typeOf _              = Left ["IllegalArguments", "TypeFunc|TypePair"]
+      typeOf _              = illegalArg "TypeFunc|TypePair"
 
 instance FeatureElImpl (TypingWith q) BasicFlag Void where
   featureImplEl (IntroFunc param) = TypingWith $ do
