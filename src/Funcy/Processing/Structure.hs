@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 module Funcy.Processing.Structure where
 
@@ -33,10 +34,7 @@ instance DomainedLocal TypeFlag where
 
 instance FeatureGlImpl (TypingIntern q) TypeFlag Void where
   featureImplGl = TypingIntern $ const typeOf where
-    error = illegalArg "[number]"
-    typeOf [num] =
-      pure . Leaf . mkUni . (1 +) <$> maybe error Right (readMaybe num)
-    typeOf _ = error
+    typeOf = fmap (Leaf . mkUni) . runArg (argParser pNumber)
 
 instance FeatureElImpl (TypingWith q) TypeFlag Void where
   featureImplEl Typed = TypingWith $ pure $ Typing
@@ -81,18 +79,17 @@ instance DomainedLocal BasicFlag where
 instance FeatureGlImpl (TypingIntern q) BasicFlag Void where
   featureImplGl = TypingIntern $ do
     inc <- asks (. Local)
-    let (>==>) = fnType inc
+    let (>-->) = fnType inc
     let tpFormer = ( do
         na <- asks $ var "a"
         nu <- asks $ var "u"
         let a = Leaf $ InRef na
         let u = Leaf $ InRef nu
-        pure $ (a >==> u) >==> u )
-    pure $ (fmap . fmap) (const tpFormer) typeOf
+        pure $ (a >--> u) >--> u )
+    pure $ check >=> const tpFormer
     where
-      fitsIn x = x == "TypeFunc" || x == "TypePair"
-      typeOf [x] | fitsIn x = Right ()
-      typeOf _              = illegalArg "TypeFunc|TypePair"
+      check = fmap (const ()) . runArg
+        (argParser $ pName "TypeFunc" <|||> pName "TypePair")
 
 instance FeatureElImpl (TypingWith q) BasicFlag Void where
   featureImplEl (IntroFunc param) = TypingWith $ do

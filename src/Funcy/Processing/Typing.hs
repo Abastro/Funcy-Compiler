@@ -52,7 +52,7 @@ instance Expansive (TypingWith q) where
 
 -- |Internal Typing
 newtype TypingIntern q p = TypingIntern {
-  runIntern :: (p -> q) -> [Binding] -> ProcError (Infer CtxProxy [] q (Term q))
+  runIntern :: (p -> q) -> [Binding] -> Infer CtxProxy [] q (Term q)
 } deriving Functor
 
 instance Expansive (TypingIntern q) where
@@ -103,7 +103,7 @@ recall :: Binding -> CtxProxy t -> Maybe t
 recall bnd (CtxProxy _ r) = r bnd
 
 recallS :: Binding -> CtxProxy t -> Infer c [] p t
-recallS bnd = maybe (throwError "Internal Error") pure . recall bnd
+recallS bnd = maybe (throwError internal) pure . recall bnd
 
 
 
@@ -117,7 +117,7 @@ listToEnv = error "formEnvironment"
 
 -- |Denotes inference procedure
 type Infer c w p
-  = ExceptT String
+  = ExceptT ErrorMsg
     (ReaderT (c (Term p))
     (WriterT (w (Constraint (Term p)))
     Identity))
@@ -137,8 +137,8 @@ infer term = case term of
     pure $ fromMaybe (referError ["Binding", ref]) refed -- TODO: More detailed error
 
   Leaf (Internal key other) -> do
-    let res = maybe (Left . (:) key) (($ id) . runIntern) (findFeature key) other
-    applyLocal $ either (pure . referError) id res
+    let tp = maybe (throwError . (:) key) (($ id) . runIntern) (findFeature key) other
+    catchError (applyLocal tp) (pure . referError) -- Catch error into AST
 
   Branch flag (Binary l r)  -> pass $ do
     let subInfer side t = local (subContext side) $ infer t
