@@ -51,20 +51,21 @@ instance FeatureElImpl (TypingWith q) TypeFlag Void where
 
 
 data BasicFlag =
-    IntroFunc Binding           -- \x : t1. t2
-    | ElimFunc                  -- t1 t2
-    | IntroPair Binding         -- (x = t1, t2)
-    | ElimPair Binding Binding  -- (p, q) = t1 in t2
+  IntroFunc Binding           -- \x. t
+  | ElimFunc                  -- t1 (t2)
+  | IntroPair Binding         -- (x = t1, t2)
+  | ElimPair Side             -- t.(0|1)
 
 -- TODO 2-type and case-specific r's into (2->r)
 
 type Basics = ModuleType BasicFlag Void
 
+-- TODO Type is not going to be specified
 lambda :: (BasicFlag -> p) -> (Binding, Term p) -> Term p -> Term p
-lambda inc (x, t) y = Branch (inc $ IntroFunc x) $ Binary t y
+lambda inc (x, t) y = Branch $ Binary (inc $ IntroFunc x) t y
 
 apply :: (BasicFlag -> p) -> Term p -> Term p -> Term p
-apply inc f x = Branch (inc ElimFunc) $ Binary f x
+apply inc f x = Branch $ Binary (inc ElimFunc) f x
 
 funcTFormer = Leaf $ Internal "Basics" ["TypeFunc"]
 pairTFormer = Leaf $ Internal "Basics" ["TypePair"]
@@ -96,7 +97,7 @@ instance FeatureElImpl (TypingWith q) BasicFlag Void where
     inc <- asks (. Local)
     pure $ Typing
       { ckEnclose = True
-      , bindType  = \tpPar _ -> pure [(param, tpPar)]
+      , bindType  = \_ _ -> pure [(param, error "TODO: Make new")]
       , combine   = \_ tpRet -> do
         tpPar <- ask >>= recallS param
         pure $ apply inc funcTFormer $ lambda inc (param, tpPar) tpRet
@@ -127,18 +128,19 @@ instance FeatureElImpl (TypingWith q) BasicFlag Void where
         pure tpRet
       }
 
-  featureImplEl (ElimPair p1 p2) = TypingWith $ do
+  featureImplEl (ElimPair side) = TypingWith $ do
     inc <- asks (. Local)
     pure $ Typing
       { ckEnclose = True
-      , bindType  = \pair tpp -> do
-        tDep  <- asks $ var "a"
-        tRest <- asks $ var "b"
-        let tpDep  = Leaf $ InRef tDep
-        let tpRest = Leaf $ InRef tRest
-        let tpp' = apply inc pairTFormer $ lambda inc (p1, tpDep) tpRest
+      , bindType  = const . const $ pure []
+      , combine   = \_ tp -> do
+        par <- asks $ var "x"
+        tpDep  <- Leaf . InRef <$> asks (var "a")
+        tpRest <- Leaf . InRef <$> asks (var "b")
+        let tp' = apply inc pairTFormer $ lambda inc (par, tpDep) tpRest
 
-        tell [Constraint tpp tpp']
-        pure [(p1, tpDep), (p2, tpRest)]
-      , combine   = const . pure
+        tell [Constraint tp tp']
+        pure $ case side of
+          LeftSide -> tpDep
+          RightSide -> tpRest
       }

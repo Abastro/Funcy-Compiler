@@ -1,65 +1,69 @@
+{-# LANGUAGE Rank2Types #-}
+{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE DeriveTraversable #-}
 module Funcy.Processing.AST where
 
+import Control.Monad.State
+import Control.Lens
+
 {-----------------------------------------------------------------------------------------------------------------------------------
-                                                    Abstract Syntx Tree
+                                                    Abstract Syntax Tree
 ------------------------------------------------------------------------------------------------------------------------------------}
-
-data Reference = InRef Binding | Internal String [String] deriving (Eq, Ord)
-
-data AST m p = Leaf Reference | Branch p (m (AST m p))
-data Binary t = Binary t t deriving (Functor, Foldable, Traversable)
-
-instance Functor m => Functor (AST m) where
-  fmap f (Leaf ref) = Leaf ref
-  fmap f (Branch flag branch) = Branch (f flag) $ (fmap . fmap) f branch
-
-data Side = LeftSide | RightSide deriving Show
-
 
 -- |Binding reference name
 type Binding = String
 
+data Reference =
+  EmptyRef                    -- Empty reference - to be used for one-sided branches
+  | InRef Binding
+  | Internal String [String]
+  deriving (Eq, Ord)
+$(makePrisms ''Reference)
 
-{-----------------------------------------------------------------------------------------------------------------------------------
-                                                    Closures
-------------------------------------------------------------------------------------------------------------------------------------}
+data AST t = Leaf Reference | Branch (t (AST t))
 
--- |Closure with given environment
-data Closure e a = Singular a | Closure e [Closure e a]
+data Binary p a = Binary p a a deriving (Functor, Foldable, Traversable)
+data Side = LeftSide | RightSide deriving (Eq, Ord, Enum, Show)
 
--- |Create closure from a list of terms
-listToClosure :: Monoid e => [a] -> Closure e a
-listToClosure = Closure mempty . fmap Singular
+-- |Location
+type Location = [Binding]
 
-enclose :: Monoid e => Closure e a -> Closure e a
-enclose = Closure mempty . (: [])
-
--- |Combines the two closure along with environment
-instance Monoid e => Semigroup (Closure e a) where
-  (Closure e m) <> (Closure e' n) = Closure (e <> e') (m <> n)
-  m             <> (Closure e n)  = Closure e (m : n)
-  m             <> n              = Closure mempty [m] <> n
-
-instance Monoid e => Monoid (Closure e a) where
-  mempty = Closure mempty []
+{-
+instance Functor m => Functor (AST m) where
+  fmap f (Leaf ref) = Leaf ref
+  fmap f (Branch flag branch) = Branch (f flag) $ (fmap . fmap) f branch
+-}
 
 
 {-----------------------------------------------------------------------------------------------------------------------------------
                                                     AST Processes
 ------------------------------------------------------------------------------------------------------------------------------------}
 
-data ASTProcess f m t p a = ASTProcess {
-  handleRef :: Reference -> f Reference,
-  handleBranch :: (p, m a) -> f (p, m a),
-  tagBranch :: p -> m a -> m (a, t),
-  localize :: t -> f a -> f a
+-- |AST Process on monad m with result r over AST t.
+-- s is the intermediate state.
+data ASTProcess m r t s = ASTProcess {
+  -- |Handle reference
+  handleRef :: Reference -> m (r Reference),
+  -- |Create state
+  mkState :: forall a. t a -> s,
+  -- |Tag branches before local processing
+  tagBranch :: forall a. t a -> t (StateT s m a),
+  -- |Handle local process on state
+  onState :: forall a. m (r a) -> StateT s m (r a),
+  -- |Merge branch after local processing
+  mergeBranch :: forall a. s -> t (r a) -> m (r (t a))
 }
 
-processAST :: (Monad f, Traversable m) => ASTProcess f m t p (AST m p) -> AST m p -> f (AST m p)
-processAST process (Leaf ref) = Leaf <$> handleRef process ref
-processAST process (Branch flag br) = do
-  let subProcess (br, tag) = localize process tag $ processAST process br
-  br' <- traverse subProcess (tagBranch process flag br)
-  (flag', br'') <- handleBranch process (flag, br')
-  pure $ Branch flag' br''
+-- |Processing of AST (Depth-first traversal)
+processAST :: (Monad m, Functor r, Traversable t) =>
+  ASTProcess m r t s -> AST t -> m (r (AST t))
+processAST process (Leaf ref) = fmap Leaf <$> handleRef process ref
+processAST process (Branch br) = do
+  -- Tagged branches
+  let tagBr = tagBranch process br
+  -- Locally process tagged AST
+  let localA tagAST = tagAST >>= onState process . processAST process
+  -- Traverse local processes
+  (procBr, state) <- runStateT (traverse localA tagBr) (mkState process br)
+  -- Handle the whole branch aftermath
+  fmap Branch <$> mergeBranch process state procBr

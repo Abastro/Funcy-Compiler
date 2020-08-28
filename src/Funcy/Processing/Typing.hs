@@ -17,10 +17,12 @@ import           Data.Functor.Identity
 import           Data.Foldable
 import           Data.Maybe
 
-import qualified Data.Set                      as Set
-import qualified Data.Graph                    as Graph
-import qualified Data.Map.Strict               as MapS
-import qualified Data.Map.Lazy                 as MapL
+import           Data.Set (Set)
+import qualified Data.Set as Set
+import           Data.Graph (Graph)
+import qualified Data.Graph as Graph
+import           Data.Map (Map)
+import qualified Data.Map as Map
 
 import           Funcy.Processing.AST
 import           Funcy.Processing.Modules
@@ -35,10 +37,10 @@ data Typing p = Typing {
   ckEnclose :: Bool
   ,
   -- |Binding from the left side - first parameter is term, second is type
-  bindType :: Term p -> Term p -> Infer CtxProxy [] p [(Binding, Term p)]
+  bindType :: Term p -> Term p -> Infer CtxProxy p [(Binding, Term p)]
   ,
   -- |Combine two 'types'
-  combine :: Term p -> Term p -> Infer CtxProxy [] p (Term p)
+  combine :: Term p -> Term p -> Infer CtxProxy p (Term p)
 }
 
 -- |Typing of certain term
@@ -52,14 +54,14 @@ instance Expansive (TypingWith q) where
 
 -- |Internal Typing
 newtype TypingIntern q p = TypingIntern {
-  runIntern :: (p -> q) -> [Binding] -> Infer CtxProxy [] q (Term q)
+  runIntern :: (p -> q) -> [Binding] -> Infer CtxProxy q (Term q)
 } deriving Functor
 
 instance Expansive (TypingIntern q) where
   expand inc = fmap $ wrap inc
 
 -- |Type analysis uses bibranch exclusively
-type Term = AST Binary
+type Term p = AST (Binary p)
 
 
 {-----------------------------------------------------------------------------------------------------------------------------------
@@ -91,6 +93,7 @@ class Context c where
   -- |get sub-context
   subContext :: Side -> c t -> c t
 
+
 data CtxProxy t = CtxProxy (Binding -> Binding) (Binding -> Maybe t)
 
 asProxy :: (Context c) => c t -> CtxProxy t
@@ -102,13 +105,13 @@ var bnd (CtxProxy v _) = v bnd
 recall :: Binding -> CtxProxy t -> Maybe t
 recall bnd (CtxProxy _ r) = r bnd
 
-recallS :: Binding -> CtxProxy t -> Infer c [] p t
+recallS :: Binding -> CtxProxy t -> Infer c p t
 recallS bnd = maybe (throwError internal) pure . recall bnd
 
 
 
 -- |Environment
-type Env t = MapL.Map Binding t
+type Env t = Map Binding t
 type Env' = ()
 
 listToEnv :: [(Binding, Term p)] -> Env'
@@ -116,10 +119,10 @@ listToEnv = error "formEnvironment"
 
 
 -- |Denotes inference procedure
-type Infer c w p
+type Infer c p
   = ExceptT ErrorMsg
     (ReaderT (c (Term p))
-    (WriterT (w (Constraint (Term p)))
+    (WriterT [Constraint (Term p)]
     Identity))
 
 
@@ -130,7 +133,7 @@ infer :: ( Context c
      , DomainedFeature (TypingIntern p) p
      , ElementFeature (TypingWith p) p )
   => Term p
-  -> Infer c (Closure Env') p (Term p)
+  -> Infer c p (Term p)
 infer term = case term of
   Leaf (InRef ref)          -> do
     refed <- asks inspect <&> ($ ref) -- TODO: Consider cross reference
@@ -140,27 +143,23 @@ infer term = case term of
     let tp = maybe (throwError . (:) key) (($ id) . runIntern) (findFeature key) other
     catchError (applyLocal tp) (pure . referError) -- Catch error into AST
 
-  Branch flag (Binary l r)  -> pass $ do
+  Branch (Binary flag l r)  -> do
     let subInfer side t = local (subContext side) $ infer t
     let typer           = runTyper (featureOf flag) id
-    let close           = if ckEnclose typer then enclose else id
 
     -- Infer type of left term, and obtain bindings
     ltype <- subInfer LeftSide l
     bound <- applyLocal $ bindType typer l ltype
-    let updated = local (applyBnd bound) . censor (encloseTerm bound) -- Localization for obtained bounds
+    let updated = local (applyBnd bound) -- Localization for obtained bounds
 
     -- Infer type of right term
     rtype <- updated $ subInfer RightSide r -- TODO need to give binding info for child closures
     tp    <- updated $ applyLocal $ combine typer ltype rtype -- Combine left and right type to obtain the whole type
-    pure (tp, close)
+    pure tp
   where
     referError  = Leaf . Internal "ReferError"
     withProxy   = mapExceptT . withReaderT $ asProxy
-    fromListing = mapExceptT . mapReaderT . mapWriter . fmap $ listToClosure
-    applyLocal  = fromListing . withProxy
-    -- Adds environment and enclose to merge
-    encloseTerm = \bnds -> enclose . (Closure (listToEnv bnds) [] <>)
+    applyLocal  = withProxy
 
 
 {-----------------------------------------------------------------------------------------------------------------------------------
@@ -168,10 +167,10 @@ infer term = case term of
 ------------------------------------------------------------------------------------------------------------------------------------}
 
 -- |Substitutions
-type Subst t = MapL.Map Binding t
+type Subst t = Map Binding t
 
 
-type UnifyState t = (Subst t, Closure (Env t) (Constraint t))
+type UnifyState t = (Subst t, [Constraint t])
 
 -- |Denotes solving procedure
 type Solve p a
@@ -179,6 +178,8 @@ type Solve p a
       String
       (StateT (UnifyState (Term p)) Identity)
       a
+
+{-
 
 -- TODO Unification search space (Proof Dictionary) - Accumulative 
 -- TODO Consider binding specific to closure
@@ -212,3 +213,5 @@ applySubst
   -> [Closure e (Constraint (Term p))]
   -> Closure e (Constraint (Term p))
 applySubst = error "applySubst"
+
+-}

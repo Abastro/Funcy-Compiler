@@ -1,88 +1,176 @@
-{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TemplateHaskell #-}
+module Funcy.Processing.Refers (
+  SyntaxIndex, SIndexed, CycIndexed, Desugar, DesugarFold, SyntaxSugar,
+  RefError, ReferInfo, Refers, procRearrange
+) where
 
-module Funcy.Processing.Refers where
-
+import           Control.Applicative
 import           Control.Monad.Reader
 import           Control.Monad.Writer
+import           Control.Monad.State
+import           Control.Lens
 
+import           Data.Coerce
+import           Data.Tuple (swap)
 import           Data.Functor.Identity
+import           Data.Functor.Compose
 import           Data.Foldable
+import           Data.Maybe
+import           Data.Function
+import           Data.Semigroup
 
-import qualified Data.Set                      as Set
-import qualified Data.Graph                    as Graph
-import qualified Data.Map.Strict               as MapS
-import qualified Data.Map.Lazy                 as MapL
+import           Data.Set               (Set)
+import qualified Data.Set as Set
+import           Data.Graph             (Graph, SCC)
+import qualified Data.Graph as Graph
+import           Data.Map               (Map)
+import qualified Data.Map as Map        (keys, singleton, lookup)
 
+import           Funcy.Processing.Util
 import           Funcy.Processing.AST
 
-
--- |Reference-specific branch structure
-data Multiple t = Bi (Binary t) | Multi [(Binding, t)]
-
--- |Placeholder for chain
-refChain :: Reference
-refChain = Internal "Chain" []
-
 {-----------------------------------------------------------------------------------------------------------------------------------
-                                                        Reference Tracking
+                                                        Reference Handling
 ------------------------------------------------------------------------------------------------------------------------------------}
 
+-- TODO How to sort?
 -- TODO Syntactic sugar handling
 -- TODO Load required module first (Need elaborate module system)
 -- Dot-overloading (foo.bar) - As a class constraint, resolved right away when trivial
 
-class BlockSugar p where
-  -- |Extract the Bindings involved.
-  binding :: p -> [Binding]
+-- |Syntax indexing with bindings involved
+data SyntaxIndex f = SyntaxIndex {
+  _partName :: String,
+  _bindings :: f Binding
+}
+$(makeLenses ''SyntaxIndex)
 
-  -- |Interpret the flag, possibly with externally given ID.
-  -- Multiple one happens with cyclic references.
-  interpret :: [Binding] -> p -> p
+type Id = Identity
+type SIndexed f = (,) (SyntaxIndex f)
+type CycIndexed = (,) [SyntaxIndex Id]
 
-  -- |Name of certain side - for logging
-  sideName :: p -> Side -> Binding
+data DesugarFold t a =
+  Simple (Endo (t a))
+  | Sort ([SIndexed Id a] -> t a)
+  | Cyclic ([SCC (SIndexed Id a)] -> t a)
+$(makePrisms ''DesugarFold)
+
+-- |Desugar type, should be generic over type a
+data Desugar t a = Desugar {
+  expandPart :: SIndexed [] a -> [SIndexed Id a],
+  _foldInto :: DesugarFold t a
+}
+$(makeLenses ''Desugar)
 
 
--- |Map from references - contains some logging
-type Refer i = MapS.Map Binding i
+class Traversable t => SyntaxSugar t where
+  -- |Index each part
+  tagPart :: t a -> t (SIndexed [] a)
 
-removeRefs :: [Binding] -> Refer i -> Refer i
-removeRefs idents = flip MapS.withoutKeys $ Set.fromList idents
+  -- |Desugar process
+  desugar :: t a -> Desugar t c
 
-type Organize
-  = ReaderT [Binding]
-    (WriterT (Refer [Binding])
+
+synIndex :: Lens' (SIndexed f a) (SyntaxIndex f)
+synIndex = _1
+
+theBinding :: Lens' (SyntaxIndex Id) Binding
+theBinding = bindings . coerced
+
+data RefError =
+  Conflict Binding [Location]                   -- Conflicts among same level declarations
+  | EarlyRef ReferInfo                          -- Illegal early references
+  | Recursive [ReferInfo]                       -- Illegal recursive references
+data ReferInfo = ReferInfo Binding Location [Location]
+
+type Refers = Union (Map Binding)
+
+
+type Rearrange
+  = ReaderT Location
+    (WriterT [RefError]
     Identity)
 
+type Referred = Writer (Refers [Location])
 
-{-----------------------------------------------------------------------------------------------------------------------------------
-                                                        Reference Organizing
-------------------------------------------------------------------------------------------------------------------------------------}
 
--- TODO How would I organize this properly
--- TODO Maybe accumulate declarations inward? How to error out?
-procOrganize :: BlockSugar p => ASTProcess Organize Multiple Binding p a
-procOrganize = ASTProcess {
-  handleRef = \ref -> do
-    case ref of
-      InRef bnd -> ask >>= tell . MapS.singleton bnd
-      _ -> pure ()
-    pure ref -- Tracks head only
+-- TODO Maybe error out?
+
+procRearrange :: SyntaxSugar t => ASTProcess Rearrange Referred t (SyntaxIndex [])
+procRearrange = ASTProcess {
+  handleRef = fmap getCompose . traverseOf _InRef $
+    \bnd -> Compose $ do
+      loc <- ask
+      pure $ writer (bnd, Union $ Map.singleton bnd [loc])
   ,
-  handleBranch = error ""
+  mergeBranch = let
+    report (SyntaxIndex name bnds) =
+      foldMap (fmap Union . Map.singleton) bnds [name]
+
+    conflictError loc bnd =
+      Conflict bnd . map (: loc)
+    recursiveError loc getRef =
+      Recursive . map ( liftA3 ReferInfo
+      (view theBinding) ((: loc) . view partName) (getRef . view theBinding) )
+    in \st br -> do
+      loc <- ask
+
+      -- AST along with gathered occurring references
+      let tagAST = sequenceA <$> tagPart br
+
+      -- Gathered declarations
+      let decls = runUnion $ foldMapOf (folded . folded . synIndex) report $ tagAST
+
+      -- Conflict check
+      -- Binding with > 1 declarations on same level -> Error
+      itraverseOf_ ( ifolded <. filtered (isJust . preview (ix 1)) )
+        (fmap tell . fmap (: []) . conflictError loc) decls
+
+      -- Topological sort
+      let expanded = concat $ traverse (expandPart $ desugar br) <$> tagAST
+      let formNode referred = (referred,
+            view (folded . synIndex . theBinding) referred,
+            Map.keys . runUnion . execWriter $ referred)
+      let comp = sequenceA <$> (Graph.stronglyConnComp $ formNode <$> expanded)
+
+      -- Cycle check
+      let allowCycle = has (foldInto . _Cyclic) $ desugar br
+      let unpack = alongside (mapGetter synIndex) (to (flip search) . to (fmap fold))
+      unless allowCycle $ itraverseOf_
+        (folded . below _CyclicSCC . to runWriter . unpack . swapped .> ifolded)
+        (fmap tell . fmap (: []) . recursiveError loc) comp
+
+      -- TODO early references check for simple case
+
+      -- Folding into a branch
+      let rmDecl = (flip . foldr $ removeWithKey @Refers) (Map.keys decls)
+      let comp' = censor rmDecl $ sequenceA comp
+      case view foldInto $ desugar br of
+        Simple tr ->
+          pure $ censor rmDecl $ appEndo tr <$> sequenceA br
+        Sort folder ->
+          pure $ folder <$> concat . fmap Graph.flattenSCC <$> comp'
+        Cyclic cycFolder -> do
+          -- TODO Better way to handle cycles
+          pure $ cycFolder <$> comp'
+
   ,
-  tagBranch = \flag branch ->
-    let nameOf = sideName flag in
-    case branch of
-      Bi (Binary l r) -> Bi (Binary (l, nameOf LeftSide) (r, nameOf RightSide))
-      Multi brs -> Multi $ listen <$> brs
+  tagBranch = fmap (state . const . swap) . tagPart
   ,
-  localize = \ident -> local (ident :)
+  mkState = const undefined -- Never used
+  ,
+  onState = \sub -> do
+    pName <- use partName
+    lift $ local (pName :) sub
 }
+
 
 -- |Finds unbound references and Sorts references by referential order.
 -- Also converts multiple branch into binaries.
-organizeRefs :: BlockSugar p => AST Multiple p -> Organize (AST Binary p)
+{-
+organizeRefs :: BlockSugar p => AST Multiple p -> Organize (AST (Binary p))
 organizeRefs (Leaf ref)                 = do
   case ref of
     InRef bnd -> ask >>= tell . MapS.singleton bnd
@@ -115,4 +203,4 @@ organizeRefs (Branch flag (Multi brs))  = pass $ do
     initial = Leaf refChain
     step other (idents, cont) = Branch (interpret idents flag) $ Binary cont other
     singular (ident, t) = ([ident], t)
-
+-}
