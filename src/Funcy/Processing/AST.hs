@@ -1,10 +1,18 @@
-{-# LANGUAGE Rank2Types #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE DeriveTraversable #-}
 module Funcy.Processing.AST where
 
 import Control.Monad.State
 import Control.Lens
+import Data.Kind
+import Data.Functor.Compose
+
+import Funcy.Processing.Util
 
 {-----------------------------------------------------------------------------------------------------------------------------------
                                                     Abstract Syntax Tree
@@ -26,44 +34,63 @@ data Binary p a = Binary p a a deriving (Functor, Foldable, Traversable)
 data Side = LeftSide | RightSide deriving (Eq, Ord, Enum, Show)
 
 -- |Location
-type Location = [Binding]
+newtype Location = Location [String] deriving (Eq)
 
-{-
-instance Functor m => Functor (AST m) where
-  fmap f (Leaf ref) = Leaf ref
-  fmap f (Branch flag branch) = Branch (f flag) $ (fmap . fmap) f branch
--}
+(//) :: Location -> String -> Location
+(Location loc) // name = Location (name : loc)
+infixr 5 //
+
+
+
+data ASTOn (c :: TypeClass) =
+  LeafOn Reference |
+  forall t. (Traversable t, c t) => BranchOn (t (ASTOn c))
 
 
 {-----------------------------------------------------------------------------------------------------------------------------------
                                                     AST Processes
 ------------------------------------------------------------------------------------------------------------------------------------}
 
--- |AST Process on monad m with result r over AST t.
--- s is the intermediate state.
-data ASTProcess m r t s = ASTProcess {
-  -- |Handle reference
-  handleRef :: Reference -> m (r Reference),
+type LeafProc m r = Reference -> (Compose m r) Reference
+
+type BranchProc (c :: TypeClass) m r =
+  forall a t. (Traversable t, c t) => LensLike' (Compose m r) (t a) a
+
+data ASTProcOn (c :: TypeClass) m r = ASTProcOn {
+  procLeaf :: LeafProc m r,
+  procBranch :: BranchProc c m r
+}
+
+data BranchProcess t m r u s = BranchProcess {
   -- |Create state
   mkState :: forall a. t a -> s,
   -- |Tag branches before local processing
   tagBranch :: forall a. t a -> t (StateT s m a),
-  -- |Handle local process on state
-  onState :: forall a. m (r a) -> StateT s m (r a),
+  -- |Handle local process on state (parameter is the subcall)
+  onState :: forall a. m (r a) -> StateT s m (u a),
   -- |Merge branch after local processing
-  mergeBranch :: forall a. s -> t (r a) -> m (r (t a))
+  mergeBranch :: forall a. s -> t (u a) -> m (r (t a))
 }
 
+mkBrProcess :: (Monad m, Functor r, Traversable t) =>
+  BranchProcess t m r u s -> LensLike' (Compose m r) (t a) a
+mkBrProcess BranchProcess {
+  mkState = mkState,
+  tagBranch = tagBranch,
+  onState = onState,
+  mergeBranch = mergeBranch
+} subProc br = Compose $ do
+  let tagBr = tagBranch br
+  let localA = (>>= onState . getCompose . subProc)
+  (procBr, state) <- runStateT (traverse localA tagBr) (mkState br)
+  mergeBranch state procBr
+
+
 -- |Processing of AST (Depth-first traversal)
-processAST :: (Monad m, Functor r, Traversable t) =>
-  ASTProcess m r t s -> AST t -> m (r (AST t))
-processAST process (Leaf ref) = fmap Leaf <$> handleRef process ref
-processAST process (Branch br) = do
-  -- Tagged branches
-  let tagBr = tagBranch process br
-  -- Locally process tagged AST
-  let localA tagAST = tagAST >>= onState process . processAST process
-  -- Traverse local processes
-  (procBr, state) <- runStateT (traverse localA tagBr) (mkState process br)
-  -- Handle the whole branch aftermath
-  fmap Branch <$> mergeBranch process state procBr
+processAST :: (Monad m, Functor r) =>
+  ASTProcOn c m r -> ASTOn c -> (Compose m r) (ASTOn c)
+processAST process (LeafOn ref) =
+  LeafOn <$> procLeaf process ref
+processAST process (BranchOn br) =
+  BranchOn <$> (procBranch process) (processAST process) br
+

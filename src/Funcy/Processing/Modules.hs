@@ -11,17 +11,16 @@
 
 module Funcy.Processing.Modules where
 
-import Control.Applicative
-import Control.Monad
+import           Control.Applicative
+import           Control.Monad
 
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import           Data.Void
 
-import Data.Void
+import           GHC.Generics
 
-import GHC.Generics
-
-import Text.Printf
+import           Text.Printf
 
 -- |Inclusion type, to represent inclusion relationship
 data Include p c = Inclusion {
