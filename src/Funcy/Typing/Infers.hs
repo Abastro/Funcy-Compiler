@@ -89,8 +89,8 @@ class Traversable t => InferType t where
   -- |Combine input types to form a type
   combine :: Stackable InferType p -> t p -> Infer p p
 
-instance Collection InferType where
-  asTraversed _ = traverse
+instance WithProperty Traversing InferType where
+  property _ = Traversing traverse
 
 
 data InState p = InState {

@@ -5,7 +5,6 @@
 module Funcy.Base.AST (
   Binding, Location, (//), Reference(..),
   ASTOn, Stackable, astStackable,
-  Collection(..),
   ASTProcOn, ASTProcIn(..), mkProcess, processAST,
   ConversionOn(..), convertAST
 ) where
@@ -53,10 +52,6 @@ astStackable = ASTOn
                                                     AST Processes
 ------------------------------------------------------------------------------------------------------------------------------------}
 
-class Collection (c :: TypeClass) where
-  asTraversed :: c t => TypeClassOf c -> Traversal (t a) (t b) a b
-
-
 type ASTProcOn (c :: TypeClass) m r =
   forall t. (c t) => LensLike' (Compose m r) (t (ASTOn c)) (ASTOn c)
 
@@ -71,7 +66,7 @@ data ASTProcIn t m r i s b = ASTProcIn {
   mergeBranch :: forall a. s -> t (i, r a) -> m (r (t a))
 }
 
-mkProcess :: (Monad m, Functor r, Collection c, c t) =>
+mkProcess :: (Monad m, Functor r, WithProperty Traversing c, c t) =>
   TypeClassOf c -> ASTProcIn t m r i s a -> LensLike' (Compose m r) (t a) a
 mkProcess cl ASTProcIn {
   mkState = mkState,
@@ -80,7 +75,7 @@ mkProcess cl ASTProcIn {
   mergeBranch = mergeBranch
 } subProc br = Compose $ do
   let localA i = onState i . getCompose . subProc
-  let proced = (asTraversed cl) (uncurry localA) (tagBranch br)
+  let proced = (cl |. traversing) (uncurry localA) (tagBranch br)
   runStateT proced (mkState br) >>= uncurry (flip mergeBranch)
 
 

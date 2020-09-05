@@ -28,17 +28,42 @@ import qualified Data.Map as Map
 --------------------------------------------------------------------}
 
 type TypeClass = (* -> *) -> Constraint
+type TypeProp = (* -> *) -> *
 
 -- Type representing certain typeclass
 data TypeClassOf (c :: TypeClass) = TypeClassOf
 
-classOf :: p c -> TypeClassOf c
+
+classOf :: f c -> TypeClassOf c
 classOf = const $ TypeClassOf
+
 
 type Id = Identity
 
 invfmap :: Functor f => f (a -> b) -> a -> f b
 invfmap f x = ($ x) <$> f
+
+
+-- |Property. First parameter MUST be constant, being certain property.
+class WithProperty p (c :: TypeClass) where
+  property :: (c t) => TypeClassOf c -> p t
+
+infix 9 |.
+(|.) :: (WithProperty p c, c t) => TypeClassOf c -> (p t -> a) -> a
+(|.) cl = ($ property cl)
+
+
+newtype Traversing t = Traversing {
+  traversing :: forall a b. Traversal (t a) (t b) a b
+}
+
+newtype Indexing i t = Indexing {
+  indexing :: forall a. t a -> t (i, a)
+}
+
+newtype Specific p t = Specific {
+  specific :: forall a. t a -> p t
+}
 
 {-------------------------------------------------------------------
                           Lens Utilities
