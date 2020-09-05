@@ -1,5 +1,3 @@
--- Module System for Funcy (Most of this is just to simulate duck typing)
-
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE FlexibleContexts #-}

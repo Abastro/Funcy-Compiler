@@ -3,33 +3,38 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TemplateHaskell #-}
 module Funcy.Processing.Refers (
-  SyntaxIndex, Desugar, DesugarFold, ReferSugar,
-  RefError, ReferInfo, Refers, Referred, Rearrange,
-  procRearrange
+  SyntaxIndex(..), Desugar(..), DesugarFold(..), ReferSugar(..),
+  defaultExpandPart,
+  RefError(..), ReferInfo(..), Refers, Referred,
+  Rearrange, procRearrange
 ) where
 
-import           Control.Applicative
-import           Control.Monad.Reader
-import           Control.Monad.Writer
-import           Control.Monad.State
-import           Control.Lens
+import Control.Monad ( when, unless, guard )
+import Control.Monad.Trans ( MonadTrans(..) )
+import Control.Monad.Reader ( ReaderT, MonadReader(..) )
+import Control.Monad.Writer ( WriterT, MonadWriter(..) )
+import Control.Monad.Identity ( Identity(..) )
+import qualified Control.Monad.Reader as Reader
+import qualified Control.Monad.Writer as Writer
 
-import           Data.Coerce
-import           Data.Tuple (swap)
-import           Data.Functor.Identity
-import           Data.Functor.Compose
-import           Data.Foldable
-import           Data.Maybe
-import           Data.Function
-import           Data.Semigroup
+import Control.Lens.TH ( makePrisms, makeLenses )
+import Control.Lens.Type ( Lens' )
+import Control.Lens.Operators ( (^.), (.>), (<.), (+=), (<>=) )
+import qualified Control.Lens.Combinators as Lens
 
-import           Data.Set               (Set)
-import           Data.Graph             (Graph, SCC)
+import Data.Coerce ( coerce )
+import Data.Foldable ( Foldable(fold, toList) )
+import Data.Maybe ( isJust )
+import Data.Monoid ( Endo(..) )
+
+import Data.Set ( Set )
+import Data.Graph ( Graph, SCC )
 import qualified Data.Graph as Graph
-import           Data.Map               (Map, assocs)
+import Data.Map ( Map )
 
-import           Funcy.Processing.Util
-import           Funcy.Processing.AST
+import Funcy.Processing.Util
+import Funcy.Processing.AST
+
 
 {-----------------------------------------------------------------------------------------------------------------------------------
                                                         Reference Handling
@@ -37,34 +42,41 @@ import           Funcy.Processing.AST
 
 -- TODO Load required module first -> Needs be addressed by main process
 
+
 -- |Syntax indexing with bindings involved.
 -- Part name should be unique in the specific syntax.
 data SyntaxIndex f = SyntaxIndex {
   _partName :: String,
   _bindings :: f Binding
 }
-$(makeLenses ''SyntaxIndex)
+$(Lens.makeLenses ''SyntaxIndex)
 
-type SIndexed f = Attach (SyntaxIndex f)
+type SIndexed f = (,) (SyntaxIndex f)
 
 theBinding :: Lens' (SyntaxIndex Id) Binding
-theBinding = bindings . coerced
+theBinding = bindings . Lens.coerced
 
 
 data DesugarFold t a =
+  -- |Reference (Leaf). No branching!
+  Refers (Binding)
   -- |Simple fold. Any kind of unfolding/folding is strictly discouraged.
-  Simple (Endo (t a))
+  | Simple (Endo (t a))
+  -- |Sorting fold
   | Sort ([SIndexed Id a] -> t a)
+  -- |Sorting fold allowing cyclic references
   | Cyclic ([SCC (SIndexed Id a)] -> t a)
 $(makePrisms ''DesugarFold)
 
 -- |Desugar type, should be generic over type a
--- TODO This does not work as things are given only for certain case..
 data Desugar t a = Desugar {
   _expandPart :: SIndexed [] a -> [SIndexed Id a],
   _foldInto :: DesugarFold t a
 }
 $(makeLenses ''Desugar)
+
+defaultExpandPart :: SIndexed [] a -> [SIndexed Id a]
+defaultExpandPart (SyntaxIndex n bs, a) = flip (,) a . SyntaxIndex n . Identity <$> bs
 
 
 class Traversable t => ReferSugar t where
@@ -73,6 +85,9 @@ class Traversable t => ReferSugar t where
 
   -- |Desugar process
   desugar :: t a -> Desugar t c
+
+instance Collection ReferSugar where
+  asTraversed _ = traverse
 
 
 data RefError =
@@ -99,115 +114,120 @@ data BrIndex f = BrIndex {
 }
 $(makeLenses ''BrIndex)
 
-oversIndex :: Lens
-  (Attach (BrIndex f) i) (Attach (BrIndex g) j)
-  (Attach (SyntaxIndex f) i) (Attach (SyntaxIndex g) j)
-oversIndex = asPair . alongside sIndex id . from asPair
-
 data InState t = InState {
   _desugaring :: forall a. Desugar t a,
-  _curIndex :: BrIndex [],
-  _decls :: Union (Map String) [String],
-  _fdecls :: Map String (Int, String)
+  _curIndex :: Int,
+  -- All declarations
+  _decls :: Refers [String],
+  -- First declarations with its position
+  _fdecls :: Map Binding (Int, String)
 }
 $(makeLenses ''InState)
 
 
-newtype InResult f a = InResult {
-  getResult :: Referred (Attach (BrIndex f) a)
-}
-
-
 procRearrange :: ASTProcOn ReferSugar Rearrange Referred
-procRearrange = ASTProcOn {
-  procLeaf = traverseOf _InRef $
-    \bnd -> Compose $ do
-      loc <- ask
-      pure $ writer (bnd, singleton bnd [loc]),
-  procBranch = mkBrProcess branchProcess
-}
+procRearrange = mkProcess (TypeClassOf @ReferSugar) theProcess
+
 
 -- TODO Maybe error out?
-branchProcess :: (ReferSugar syntax) =>
-  (BranchProcess syntax Rearrange Referred) (InResult []) (InState syntax)
-branchProcess = BranchProcess {
+
+theProcess :: (ReferSugar syntax) =>
+  (ASTProcIn syntax Rearrange Referred) (BrIndex []) (InState syntax) a
+theProcess = ASTProcIn {
+  tagBranch = Lens.over (Lens.mapped . attached) (BrIndex 0) . tagPart
+  ,
+  mkState = \br -> InState {
+    _desugaring = desugar br,
+    _curIndex = 0,
+    _decls = cempty,
+    _fdecls = cempty
+  },
+  onState = \index sub -> do
+    dsf <- Lens.use $ desugaring . foldInto
+    let pName = index ^. sIndex . partName
+    let bnds = index ^. sIndex . bindings
+    iindex <- Lens.use curIndex
+
+    decls <>= foldMap singleton bnds [pName]            -- Gather declarations (using union)
+    when (Lens.has _Simple dsf) $ do
+      fdecls <>= foldMap singleton bnds (iindex, pName) -- Gather first declarations
+      curIndex += 1
+
+    ast <- lift $ local (// pName) sub
+    pure (Lens.set iIndex iindex index, ast),
   mergeBranch = \st br -> do
     loc <- ask
     let dsf = st ^. desugaring . foldInto
 
     -- Topological sort
-    let expand = traverseOf oversIndex $ st ^. desugaring . expandPart
-    let expanded = concat $ sequenceA . fmap expand . getResult <$> br
-    let formNode referred = (referred,
-          referred ^. folded . attached . sIndex . theBinding,
-          keyList . execWriter $ referred)
-    let comp = sequenceA <$> (Graph.stronglyConnComp $ formNode <$> expanded)
+    let expand = Lens.traverseOf (Lens.alongside sIndex id) $ st ^. desugaring . expandPart
+    let formNode referred = (sequenceA referred,
+          referred ^. attached . sIndex . theBinding,
+          referred ^. content . Lens.to (keyList . Writer.execWriter))
+    let comp = map sequenceA . Graph.stronglyConnComp . map formNode $ foldMap expand br
 
     -- Conflict check
     -- Binding with > 1 declarations on same level -> Error
-    itraverseOf_ ( ifolded <. filtered (isJust . preview (ix 1)) )
-      (fmap tell . conflictError loc) (runUnion $ st ^. decls)
+    unless (Lens.has _Refers dsf) $ do
+      Lens.itraverseOf_ ( Lens.ifolded <. Lens.filtered (isJust . Lens.preview (Lens.ix 1)) )
+        (fmap tell . conflictError loc) (runUnion $ st ^. decls)
 
-    -- Cycle check
-    unless (has _Cyclic dsf) $ do
-      let unpackCc = alongside (mapGetter $ attached . sIndex) (to (flip search) . mapGetter (to fold))
-      itraverseOf_
-        (traversed . below _CyclicSCC . to runWriter . unpackCc . swapped .> ifolded)
-        (fmap tell . recursiveError loc) comp
+    -- Cycle check - cyclic SCCs are not allowed unless cyclic
+    unless (Lens.has _Cyclic dsf || Lens.has _Refers dsf) $ do
+      let unpack = Lens.to Writer.runWriter . Lens.alongside (mapGetter $ attached . sIndex) id
+      Lens.itraverseOf_
+        (Lens.traversed . Lens.below _CyclicSCC . unpack .> Lens.ifolded)
+        (fmap tell . flip (recursiveError loc)) comp
 
     -- Early reference check (Simple case only)
-    when (has _Simple dsf) $ do
-      let getDecl = st ^. fdecls . to (flip search) . mapGetter (to toList)
-      let unpackErc = alongside (attached . iIndex) (to runUnion . to assocs) . to (transposeOf _2)
-      itraverseOf_
-        (traversed . below _AcyclicSCC . to runWriter . unpackErc . folded .> ifolded)
-        (fmap tell . (uncurry <$> earlyRefError loc getDecl)) comp
+    when (Lens.has _Simple dsf) $ do
+      let unpack = Lens.to Writer.runWriter . Lens.alongside (attached . iIndex) id
+      Lens.itraverseOf_
+        (Lens.traversed . Lens.below _AcyclicSCC . unpack .> Lens.ifolded)
+        (fmap tell . earlyRefError loc (st ^. fdecls)) comp
 
     -- Folding into a branch
     let rmDecl = (flip . foldr $ removeWithKey @Refers) (keyList $ st ^. decls)
-    let comp' = censor rmDecl $ sequenceA comp
+    let br' = Writer.censor rmDecl $ sequenceA (br ^. mapGetter content)
+    let comp' = sequenceA comp ^. Lens.to (Writer.censor rmDecl) . map3Getter (Lens.alongside sIndex id)
     case dsf of
+      Refers bnd -> do
+        -- Reference is handled here - No work is actually done above since collection is empty
+        pure $ tell (singleton bnd [loc]) >> br'
       Simple tr ->
-        let stripBr = view (mapGetter content) . getResult <$> br in
-        pure $ censor rmDecl $ appEndo tr <$> sequenceA stripBr
-      Sort folder -> do
-        comp' ^. mapGetter (
-          mapGetter (mapGetter oversIndex . to Graph.flattenSCC) . to concat . to folder) . to pure
+        pure $ appEndo tr <$> br'
+      Sort folder ->
+        pure $ folder . foldMap Graph.flattenSCC <$> comp'
       Cyclic cycFolder ->
-        comp' ^. mapGetter (mapGetter (mapGetter oversIndex) . to cycFolder) . to pure
-  ,
-  tagBranch = (. tagPart) $ fmap $ (curIndex . sIndex %%=) . const . swap . (^. asPair)
-  ,
-  mkState = \br -> InState {
-    _desugaring = desugar br,
-    _curIndex = BrIndex 0 undefined,
-    _decls = cempty,
-    _fdecls = cempty
-  },
-  onState = \sub -> do
-    dsf <- use $ desugaring . foldInto
-    index <- use $ curIndex
-    let pName = index ^. sIndex . partName
-    let bnds = index ^. sIndex . bindings
-
-    decls <>= foldMap singleton bnds [pName]            -- Gather declarations (using union)
-    when (has _Simple dsf) $ do
-      let iindex = index ^. iIndex
-      fdecls <>= foldMap singleton bnds (iindex, pName) -- Gather first declarations
-      curIndex . iIndex += 1
-
-    ast <- lift $ local (// pName) sub
-    pure $ InResult $ Attach index <$> ast
+        pure $ cycFolder <$> comp'
 } where
-  conflictError loc bnd =
-    (: []) . Conflict bnd . map (loc //)
+  conflictError loc bnd names =
+    (: []) . Conflict bnd $ map (loc //) names
 
-  earlyRefError loc getDecl refInd bnd = invfmap $ do
-    (declInd, name) <- getDecl bnd
+  -- |Early Reference Error
+  earlyRefError loc decls refInd refers = EarlyRef <$> do
+    (bnd, refloc) <- pairList @Refers refers
+    (declInd, name) <- toList $ search @(Map Binding) bnd decls
     -- Error only when reference earlier than declaration
     guard (refInd < declInd)
-    pure $ EarlyRef . ReferInfo bnd (loc // name)
+    pure $ ReferInfo bnd (loc // name) refloc
 
-  recursiveError loc getRef =
-    (: []) . Recursive . map ( liftA3 ReferInfo
-    (^. theBinding) (^. partName . to (loc //)) (^. theBinding . to getRef) )
+  -- |Recursive Error
+  recursiveError loc refers parts = (: []) . Recursive $ do
+    part <- parts
+    let bnd = part ^. theBinding
+    let name = part ^. partName
+    pure $ ReferInfo bnd (loc // name) (fold $ search @Refers bnd refers)
+
+
+{-----------------------------------------------------------------------------------------------------------------------------------
+                                                        Basic instance
+------------------------------------------------------------------------------------------------------------------------------------}
+
+-- |Reference case
+instance ReferSugar Reference where
+  tagPart = coerce
+  desugar ref = Desugar {
+    _expandPart = defaultExpandPart, -- Placeholder
+    _foldInto = Refers $ getReference ref
+  }

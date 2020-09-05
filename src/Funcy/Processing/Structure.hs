@@ -1,146 +1,99 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE DeriveTraversable #-}
 module Funcy.Processing.Structure where
 
-import           Control.Monad.Reader
-import           Control.Monad.Writer
-import           Control.Monad.Except
+import Control.Monad.Writer ( MonadWriter(..) )
+import Control.Lens.Operators ( (^.) )
 
-import           Data.Void
-import           Data.Functor
-
-import           Text.Read
-
-import           Funcy.Processing.AST
-import           Funcy.Processing.Modules
-import           Funcy.Processing.Typing
-import           Funcy.Processing.Message
+import Funcy.Processing.AST
+import Funcy.Processing.Typing
 
 
-data TypeFlag =
-  Typed -- t2 : t1 (t2 has type t1)
+data TypeUni a =
+  TypeUni Int
+  | Typed a a -- Typed t1 t2 ~ t2 : t1 (t2 has type t1)
+  deriving (Functor, Foldable, Traversable)
+
+vForceT :: Infer a Binding
+vForceT = mkVar "force'"
+
+bindTyped :: TypeBinder p
+bindTyped = TypeBinder $ \r -> do
+  tpName <- vForceT
+  pure [(tpName, r ^. theTerm)]
+
+instance InferType TypeUni where
+  tagPart stack (TypeUni n) = TypeUni n
+  tagPart stack (Typed tp term) = Typed
+    (TypingIndex "#type" $ bindTyped, tp)
+    (TypingIndex "#term" defaultBinder, term)
+
+  combine stack (TypeUni n) = pure $ stack $ TypeUni (n+1)
+  combine stack (Typed inferTp _) = do
+    tpName <- vForceT
+    specTp <- boundOf tpName
+    tell [Constraint inferTp specTp]
+    pure specTp -- Gives explicit type
 
 
-mkUni :: Int -> Reference
-mkUni num = Internal "UType" [show num]
+data Side = Dep | Rest
 
-tpPrefix = "force_"
-
--- |Module for universe type
-type UniType = ModuleType TypeFlag Void
-
-instance DomainedLocal TypeFlag where
-  mInstance = MInstance "UType"
-
-instance FeatureGlImpl (TypingIntern q) TypeFlag Void where
-  featureImplGl = TypingIntern $ const typeOf where
-    typeOf = fmap (Leaf . mkUni) . runArg (argParser pNumber)
-
-instance FeatureElImpl (TypingWith q) TypeFlag Void where
-  featureImplEl Typed = TypingWith $ pure $ Typing
-    { ckEnclose = True
-    , bindType  = \tp _ -> do
-                    tpName <- asks $ var tpPrefix
-                    pure [(tpName, tp)]
-    , combine   = \_ tp' -> do
-                    tpName <- asks $ var tpPrefix
-                    tp     <- ask >>= recallS tpName
-                    tell [Constraint tp tp'] -- Unify type
-                    pure tp -- Gives explicit type
-    }
-
-
-data BasicFlag =
-  IntroFunc Binding           -- \x. t
-  | ElimFunc                  -- t1 (t2)
-  | IntroPair Binding         -- (x = t1, t2)
-  | ElimPair Side             -- t.(0|1)
+data BasicTerm a =
+  FuncType Binding a a            -- Pi (x : t1) t2
+  | PairType Binding a a          -- Sigma (x : t1) t2
+  | IntroFunc Binding a a         -- \x : t1. t2
+  | ElimFunc a a                  -- t1 (t2)
+  | IntroPair Binding a a         -- (x = t1, t2)
+  | ElimPair Side a               -- t.(0|1)
+  deriving (Functor, Foldable, Traversable)
 
 -- TODO 2-type and case-specific r's into (2->r)
 
-type Basics = ModuleType BasicFlag Void
+bindIntroFunc :: Binding -> TypeBinder p
+bindIntroFunc bnd = TypeBinder $ \r -> do
+  pure [(bnd, r ^. theTerm)]
 
--- TODO Type is not going to be specified
-lambda :: (BasicFlag -> p) -> (Binding, Term p) -> Term p -> Term p
-lambda inc (x, t) y = Branch $ Binary (inc $ IntroFunc x) t y
+bindIntroPair :: Binding -> TypeBinder p
+bindIntroPair bnd = TypeBinder $ \r -> do
+  pure [(bnd, r ^. theType)]
 
-apply :: (BasicFlag -> p) -> Term p -> Term p -> Term p
-apply inc f x = Branch $ Binary (inc ElimFunc) f x
+instance InferType BasicTerm where
+  tagPart stack (IntroFunc bnd tp term) = IntroFunc bnd
+    (TypingIndex "#tparam" $ bindIntroFunc bnd, tp)
+    (TypingIndex "#ret" $ defaultBinder, term)
 
-funcTFormer = Leaf $ Internal "Basics" ["TypeFunc"]
-pairTFormer = Leaf $ Internal "Basics" ["TypePair"]
+  tagPart stack (ElimFunc fun par) = ElimFunc
+    (TypingIndex "#func" defaultBinder, fun)
+    (TypingIndex "#param" defaultBinder, par)
 
--- |Basic function type
-fnType :: (BasicFlag -> p) -> Term p -> Term p -> Term p
-fnType inc a b = apply inc funcTFormer $ lambda inc ("#unused", a) b
+  tagPart stack (IntroPair bnd dep rest) = IntroPair bnd
+    (TypingIndex "#dep" $ bindIntroPair bnd, dep)
+    (TypingIndex "#rest" defaultBinder, rest)
 
-instance DomainedLocal BasicFlag where
-  mInstance = MInstance "Basics"
+  tagPart stack (ElimPair side pair) = ElimPair side
+    (TypingIndex "#pair" defaultBinder, pair)
 
-instance FeatureGlImpl (TypingIntern q) BasicFlag Void where
-  featureImplGl = TypingIntern $ do
-    inc <- asks (. Local)
-    let (>-->) = fnType inc
-    let tpFormer = ( do
-        na <- asks $ var "a"
-        nu <- asks $ var "u"
-        let a = Leaf $ InRef na
-        let u = Leaf $ InRef nu
-        pure $ (a >--> u) >--> u )
-    pure $ check >=> const tpFormer
-    where
-      check = fmap (const ()) . runArg
-        (argParser $ pName "TypeFunc" <|||> pName "TypePair")
+  combine stack (IntroFunc bnd _ tp) = do
+    parTp <- boundOf bnd -- No good way to infer the parameter type. How would I impl this?
+    pure $ stack $ FuncType bnd parTp tp
 
-instance FeatureElImpl (TypingWith q) BasicFlag Void where
-  featureImplEl (IntroFunc param) = TypingWith $ do
-    inc <- asks (. Local)
-    pure $ Typing
-      { ckEnclose = True
-      , bindType  = \_ _ -> pure [(param, error "TODO: Make new")]
-      , combine   = \_ tpRet -> do
-        tpPar <- ask >>= recallS param
-        pure $ apply inc funcTFormer $ lambda inc (param, tpPar) tpRet
-      }
+  combine stack (ElimFunc funTp parTp) = do
+    bnd <- mkVar "param"
+    resT <- stack . Reference <$> mkVar "tres"
+    let funTp' = stack $ FuncType bnd parTp resT
+    tell [Constraint funTp funTp']
+    pure resT
 
-  featureImplEl (IntroPair dep) = TypingWith $ do
-    inc <- asks (. Local)
-    pure $ Typing
-      {
-        -- TODO May not enclose in some cases
-        ckEnclose = True
-      , bindType  = \_ tpDep -> pure [(dep, tpDep)]
-      , combine   = \tpDep tpRest ->
-        pure $ apply inc pairTFormer $ lambda inc (dep, tpDep) tpRest
-      }
+  combine stack (IntroPair bnd depTp restTp) = do
+    pure $ stack $ PairType bnd depTp restTp
 
-  featureImplEl ElimFunc = TypingWith $ do
-    inc <- asks (. Local)
-    pure $ Typing
-      { ckEnclose = True
-      , bindType  = const . const $ pure []
-      , combine   = \tpf tpx -> do
-        par <- asks $ var "p"
-        blk <- asks $ var "r"
-        let tpRet = Leaf $ InRef blk
-        let tpf' = apply inc funcTFormer $ lambda inc (par, tpx) tpRet
-        tell [Constraint tpf tpf']
-        pure tpRet
-      }
+  combine stack (ElimPair side pairTp) = do
+    bnd <- mkVar "dep"
+    depT <- stack . Reference <$> mkVar "tdep"
+    resT <- stack . Reference <$> mkVar "tres"
+    let pairTp' = stack $ PairType bnd depT resT
+    tell [Constraint pairTp pairTp']
+    case side of
+      Dep -> pure depT
+      Rest -> pure resT
 
-  featureImplEl (ElimPair side) = TypingWith $ do
-    inc <- asks (. Local)
-    pure $ Typing
-      { ckEnclose = True
-      , bindType  = const . const $ pure []
-      , combine   = \_ tp -> do
-        par <- asks $ var "x"
-        tpDep  <- Leaf . InRef <$> asks (var "a")
-        tpRest <- Leaf . InRef <$> asks (var "b")
-        let tp' = apply inc pairTFormer $ lambda inc (par, tpDep) tpRest
-
-        tell [Constraint tp tp']
-        pure $ case side of
-          LeftSide -> tpDep
-          RightSide -> tpRest
-      }

@@ -1,12 +1,14 @@
 module Funcy.Processing.Message where
 
 import Control.Monad.Except
+    ( withExceptT, MonadError(..), MonadTrans(..), ExceptT )
 import Control.Monad.State
-import Control.Monad.Identity
+    ( MonadState(..), StateT(..) )
 
-import Text.ParserCombinators.ReadP hiding (get)
+import Text.ParserCombinators.ReadP (ReadP)
+import qualified Text.ParserCombinators.ReadP as ReadP
 
-import Data.List
+import Data.List ( intersperse )
 
 
 type ErrorMsg = [String]
@@ -27,27 +29,27 @@ data Format =
   FChoice [Format]
 
 instance Show Format where
-  show (FName x) = x
-  show FNumber = "{number}"
+  show (FName x)   = x
+  show FNumber     = "{number}"
   show (FChoice f) = concat . intersperse "|" $ fmap show f
 
 type Parser a = (ReadP a, Format)
 
 parseWith :: Monad m => Parser a -> String -> ExceptT String m a
 parseWith (parser, format) content =
-  case readP_to_S parser content of
+  case ReadP.readP_to_S parser content of
     ((x, "") : _) -> pure x
-    _ -> throwError $ show format
+    _             -> throwError $ show format
 
 
 pName :: String -> Parser String
-pName x = (string x, FName x)
+pName x = (ReadP.string x, FName x)
 
 pNumber :: Parser Int
-pNumber = (readS_to_P reads, FNumber)
+pNumber = (ReadP.readS_to_P reads, FNumber)
 
 pChoice :: [Parser a] -> Parser a
-pChoice parsers = (choice $ map fst parsers, FChoice $ map snd parsers)
+pChoice parsers = (ReadP.choice $ map fst parsers, FChoice $ map snd parsers)
 
 (<|||>) :: Parser a -> Parser a -> Parser a
 a <|||> b = pChoice [a, b]
