@@ -1,10 +1,6 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE DeriveFunctor #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-module Funcy.Processing.Typing (
+module Funcy.Typing.Infers (
   Constraint(..), TypedTerm(..), theType, theTerm,
   TypingIndex(..), InferType(..), TypeBinder(..), defaultBinder,
   Infer, mkVar, boundOf, procInfer,
@@ -22,9 +18,9 @@ import qualified Control.Lens.Combinators as Lens
 
 import Data.Coerce ( coerce )
 
-import Funcy.Processing.Util
-import Funcy.Processing.AST
-import Funcy.Processing.Message ( ErrorMsg )
+import Funcy.Base.Util
+import Funcy.Base.AST
+import Funcy.Base.Message ( ErrorMsg )
 
 
 {-------------------------------------------------------------------
@@ -103,7 +99,9 @@ data InState p = InState {
 $(makeLenses ''InState)
 
 
-procInfer :: ASTProcOn InferType (Infer (ASTOn InferType)) (TypedTerm (ASTOn InferType))
+procInfer :: ASTProcOn InferType
+  (Infer (ASTOn InferType))
+  (TypedTerm (ASTOn InferType))
 procInfer = mkProcess (TypeClassOf @InferType) (theProcess astStackable)
 
 theProcess :: (InferType term) => Stackable InferType p ->

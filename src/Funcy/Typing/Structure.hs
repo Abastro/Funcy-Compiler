@@ -1,13 +1,10 @@
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE DeriveTraversable #-}
-module Funcy.Processing.Structure where
+module Funcy.Typing.Structure where
 
 import Control.Monad.Writer ( MonadWriter(..) )
 import Control.Lens.Operators ( (^.) )
 
-import Funcy.Processing.AST
-import Funcy.Processing.Typing
-
+import Funcy.Base.AST
+import Funcy.Typing.Infers
 
 data TypeUni a =
   TypeUni Int

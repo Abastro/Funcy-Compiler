@@ -1,14 +1,13 @@
-{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DefaultSignatures #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE LambdaCase #-}
 
-module Funcy.Processing.Modules where
+module Funcy.Base.Modules where
 
+-- TODO Remove
+
+{-
 import           Control.Applicative
 import           Control.Monad
 
@@ -218,3 +217,4 @@ instance (FeatureGlImpl f loc dep, DomainedFeature f dep) => DomainedFeature f (
     where
       featureInModule :: FeatureGlImpl f loc dep => Domain -> ModuleDomain loc -> Maybe (f (ModuleType loc dep))
       featureInModule domain (MInstance domM) = if domain == domM then Just featureImplGl else Nothing
+-}

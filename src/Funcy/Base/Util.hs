@@ -1,14 +1,16 @@
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
 
-module Funcy.Processing.Util where
+module Funcy.Base.Util where
 
 import Control.Monad.Identity ( Identity )
 
-import Control.Lens.Type ( Lens, Iso, Getter )
+import Control.Lens.TH ( makePrisms )
+import Control.Lens.Type
+  ( Lens, Iso, Getter, Setter, Fold, Traversal )
+import Control.Lens.Combinators
+  ( FoldableWithIndex, TraversableWithIndex, IndexedFold, IndexedTraversal )
 import qualified Control.Lens.Combinators as Lens
 
 import Data.Kind ( Constraint )
@@ -20,9 +22,10 @@ import qualified Data.IntMap as IntMap
 import qualified Data.Map as Map
 
 
-{-----------------------------------------------------------------------------------------------------------------------------------
-                                                        Miscellaneous
-------------------------------------------------------------------------------------------------------------------------------------}
+
+{-------------------------------------------------------------------
+                              Basics
+--------------------------------------------------------------------}
 
 type TypeClass = (* -> *) -> Constraint
 
@@ -37,9 +40,32 @@ type Id = Identity
 invfmap :: Functor f => f (a -> b) -> a -> f b
 invfmap f x = ($ x) <$> f
 
-{-----------------------------------------------------------------------------------------------------------------------------------
-                                                        Lens Utilities
-------------------------------------------------------------------------------------------------------------------------------------}
+{-------------------------------------------------------------------
+                          Lens Utilities
+--------------------------------------------------------------------}
+
+-- Re-exported basic combinators (with restrictions)
+folded :: Foldable f => Fold (f a) a
+folded = Lens.folded
+
+mapped :: Functor f => Setter (f a) (f b) a b
+mapped = Lens.mapped
+
+traversed :: Traversable f => Traversal (f a) (f b) a b
+traversed = Lens.traversed
+
+ifolded :: FoldableWithIndex i f => IndexedFold i (f a) a
+ifolded = Lens.ifolded
+
+itraversed :: TraversableWithIndex i f => IndexedTraversal i (f a) (f b) a b
+itraversed = Lens.itraversed
+
+attached :: Lens (i, a) (j, a) i j
+attached = Lens._1
+
+content :: Lens (i, a) (i, b) a b
+content = Lens._2
+
 
 mapGetter :: Functor f => Getter s a -> Getter (f s) (f a)
 mapGetter = Lens.to . fmap . Lens.view
@@ -50,15 +76,11 @@ map2Getter = Lens.to . fmap . fmap . Lens.view
 map3Getter :: (Functor f, Functor g, Functor h) => Getter s a -> Getter (f (g (h s))) (f (g (h a)))
 map3Getter = Lens.to . fmap . fmap . fmap . Lens.view
 
-attached :: Lens (i, a) (j, a) i j
-attached = Lens._1
 
-content :: Lens (i, a) (i, b) a b
-content = Lens._2
 
-{-----------------------------------------------------------------------------------------------------------------------------------
-                                                        Data Structure Wrapping
-------------------------------------------------------------------------------------------------------------------------------------}
+{-------------------------------------------------------------------
+                      Data Structure Wrappers
+--------------------------------------------------------------------}
 
 -- | Dictionary, i.e. map. Used alike a multiset.
 class (Foldable f) => Dictionary f where
@@ -119,4 +141,4 @@ instance (Dictionary f, Semigroup a) => Semigroup (Union f a) where
 instance (Dictionary f, Semigroup a) => Monoid (Union f a) where
   mempty = Union cempty
 
-$(Lens.makePrisms ''SCC)
+$(makePrisms ''SCC)

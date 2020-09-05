@@ -1,12 +1,14 @@
-{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE ExistentialQuantification #-}
-{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE DeriveTraversable #-}
-module Funcy.Processing.AST where
+module Funcy.Base.AST (
+  Binding, Location, (//), Reference(..),
+  ASTOn, Stackable, astStackable,
+  Collection(..),
+  ASTProcOn, ASTProcIn(..), mkProcess, processAST,
+  ConversionOn(..), convertAST
+) where
 
 import Control.Monad.State ( StateT(..) )
 import Control.Lens.Type ( LensLike', Traversal )
@@ -14,18 +16,14 @@ import qualified Control.Lens.Combinators as Lens
 
 import Data.Functor.Compose ( Compose(..) )
 
-import Funcy.Processing.Util ( classOf, TypeClass, TypeClassOf )
+import Funcy.Base.Util
 
-{-----------------------------------------------------------------------------------------------------------------------------------
-                                                    Abstract Syntax Tree
-------------------------------------------------------------------------------------------------------------------------------------}
+{-------------------------------------------------------------------
+                      Abstract Syntax Tree
+--------------------------------------------------------------------}
 
 -- |Binding reference name
 type Binding = String
-
-{-
-data AST t = Leaf Reference | Branch (t (AST t))
--}
 
 -- |Location
 newtype Location = Location [String] deriving (Eq)
@@ -33,7 +31,6 @@ newtype Location = Location [String] deriving (Eq)
 (//) :: Location -> String -> Location
 (Location loc) // name = Location (name : loc)
 infixr 5 //
-
 
 
 newtype Reference a = Reference {
@@ -91,7 +88,7 @@ mkProcess cl ASTProcIn {
 processAST :: (Monad m, Functor r) =>
   ASTProcOn c m r -> ASTOn c -> (Compose m r) (ASTOn c)
 processAST process (ASTOn br) =
-  ASTOn <$> Lens.traverseOf process (processAST process) br
+  ASTOn <$> process (processAST process) br
 
 
 class ConversionOn (c :: TypeClass) (d :: TypeClass) where

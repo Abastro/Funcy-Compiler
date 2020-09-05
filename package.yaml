@@ -30,6 +30,17 @@ dependencies:
 
 library:
   source-dirs: src
+  default-extensions:
+  - FlexibleContexts
+  - FlexibleInstances
+  - MultiParamTypeClasses
+  - DataKinds
+  - ConstraintKinds
+  - DeriveFunctor
+  - DeriveFoldable
+  - DeriveTraversable
+  - TypeApplications
+  - TupleSections
 
 executables:
   funcy-compiler-exe:
