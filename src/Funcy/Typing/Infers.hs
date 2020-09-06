@@ -1,16 +1,16 @@
-{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TemplateHaskell #-}
 module Funcy.Typing.Infers (
   Constraint(..), TypedTerm(..), theType, theTerm,
-  TypingIndex(..), InferType(..), TypeBinder(..), defaultBinder,
-  Infer, mkVar, boundOf, procInfer,
+  TypingIndex(..), TypeBinder(..), defaultBinder, TypeCombine(..),
+  Infer, mkVar, boundOf, sBoundOf,
+  internalProcInfer
 ) where
 
 import Control.Monad.Identity ( Identity )
 import Control.Monad.Reader
     ( MonadTrans(..), ReaderT, MonadReader(..) )
 import Control.Monad.Writer ( WriterT )
-import Control.Monad.Except ( ExceptT )
+import Control.Monad.Except ( ExceptT, throwError )
 
 import Control.Lens.TH ( makeLenses )
 import Control.Lens.Operators ( (^.), (<>=) )
@@ -20,22 +20,15 @@ import Data.Coerce ( coerce )
 
 import Funcy.Base.Util
 import Funcy.Base.AST
-import Funcy.Base.Message ( ErrorMsg )
+import Funcy.Base.Message
 
-
-{-------------------------------------------------------------------
-                          Typing & Inference
---------------------------------------------------------------------}
-
-{-
-t1 ~ t2, (term) unification (System of equation solving)
-Full equality / inference with implementation detals hidden
--}
 
 -- |Constaint for unification
 data Constraint t = Constraint {
-  termA :: t,
-  termB :: t
+  -- |Internal inferred term
+  inTerm :: t,
+  -- |External specified term
+  outTerm :: t
 }
 
 data TypedTerm p a = TypedTerm {
@@ -47,18 +40,23 @@ $(makeLenses ''TypedTerm)
 
 data InferCtx a = InferCtx {
   _getVar :: String -> Binding,
-  _getBound :: Binding -> a,
+  _getBound :: Binding -> Maybe a,
   _subCtx :: Binding -> InferCtx a,
   _addBound :: [(Binding, a)] -> InferCtx a
 }
 $(makeLenses ''InferCtx)
 
+-- |Creates a fresh variable.
 mkVar :: String -> Infer a Binding
 mkVar name = Lens.view (getVar . Lens.to ($ name))
 
-boundOf :: Binding -> Infer a a
+-- |Looks for type of certain bound.
+boundOf :: Binding -> Infer a (Maybe a)
 boundOf bnd = Lens.view (getBound . Lens.to ($ bnd))
 
+-- |Looks for type of certain bound. Errors out if it doesn't exist
+sBoundOf :: Binding -> Infer a a
+sBoundOf bnd = boundOf bnd >>= maybe (throwError internal) pure
 
 -- |Denotes inference procedure
 type Infer a
@@ -70,7 +68,12 @@ type Infer a
 
 newtype TypeBinder p = TypeBinder {
   -- |Bind vars with inferred type
-  bindType :: forall a. TypedTerm p p -> Infer p [(Binding, p)]
+  bindType :: TypedTerm p p -> Infer p [(Binding, p)]
+}
+
+newtype TypeCombine p t = TypeCombine {
+  -- |Combines type
+  combineType :: t p -> Infer p p
 }
 
 -- |Binder which does not bind anything
@@ -83,32 +86,18 @@ data TypingIndex p = TypingIndex {
 }
 $(makeLenses ''TypingIndex)
 
-class Traversable t => InferType t where
-  -- |Tag the part
-  tagPart :: Stackable InferType p -> t a -> t (TypingIndex p, a)
-  -- |Combine input types to form a type
-  combine :: Stackable InferType p -> t p -> Infer p p
-
-instance WithProperty Traversing InferType where
-  property _ = Traversing traverse
-
 
 data InState p = InState {
   _bounds :: [(Binding, p)]
 }
 $(makeLenses ''InState)
 
-
-procInfer :: ASTProcOn InferType
-  (Infer (ASTOn InferType))
-  (TypedTerm (ASTOn InferType))
-procInfer = mkProcess (TypeClassOf @InferType) (theProcess astStackable)
-
-theProcess :: (InferType term) => Stackable InferType p ->
+internalProcInfer :: (Traversable term) =>
+  Indexing (TypingIndex p) term -> TypeCombine p term ->
   (ASTProcIn term (Infer p) (TypedTerm p)) (TypingIndex p) (InState p) p
-theProcess stack = ASTProcIn {
+internalProcInfer dex comb = ASTProcIn {
   mkState = const $ InState [],
-  tagBranch = tagPart stack,
+  tagBranch = indexing dex,
   onState = \part sub -> do
     bnds <- Lens.use bounds
     res <- lift $ local (childCtx (part ^. partName) . applyBnd bnds) sub
@@ -118,18 +107,13 @@ theProcess stack = ASTProcIn {
   mergeBranch = \state br -> do
     let tps = Lens.view (content . theType) <$> br
     let term = Lens.view (content . theTerm) <$> br
-    tp <- local (applyBnd $ state ^. bounds) $ combine stack tps
+    tp <- local (applyBnd $ state ^. bounds) $ combineType comb tps
     pure $ TypedTerm term tp
 } where
   childCtx name = Lens.foldMapOf subCtx ($ name)
   applyBnd bnds = Lens.foldMapOf addBound ($ bnds)
 
 
-instance InferType Reference where
-  tagPart stack = coerce
-  combine stack (Reference ref) = do
-    -- Lookup type dict? Or no?
-    undefined
 
 {-------------------------------------------------------------------
                           Constraint Solving

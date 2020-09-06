@@ -4,9 +4,9 @@
 {-# LANGUAGE TemplateHaskell #-}
 module Funcy.Base.AST (
   Binding, Location, (//), Reference(..),
-  ASTOn, Stackable, astStackable,
+  ASTOn, Stacking(..), astStacking,
   ASTProcOn, ASTProcIn(..), mkProcess, processAST,
-  ConversionOn(..), convertAST
+  Conversion(..), convertAST
 ) where
 
 import Control.Monad.State ( StateT(..) )
@@ -41,16 +41,17 @@ newtype Reference a = Reference {
 data ASTOn (c :: TypeClass) =
   forall t. (c t) => ASTOn (t (ASTOn c))
 
-type Stackable (c :: TypeClass) p =
-  forall t. (c t) => t p -> p
+newtype Stacking (c :: TypeClass) p = Stacking {
+  stack :: forall t. (c t) => t p -> p
+}
 
-astStackable :: Stackable c (ASTOn c)
-astStackable = ASTOn
+astStacking :: Stacking c (ASTOn c)
+astStacking = Stacking ASTOn
 
+{-------------------------------------------------------------------
+                          AST Processes
+--------------------------------------------------------------------}
 
-{-----------------------------------------------------------------------------------------------------------------------------------
-                                                    AST Processes
-------------------------------------------------------------------------------------------------------------------------------------}
 
 type ASTProcOn (c :: TypeClass) m r =
   forall t. (c t) => LensLike' (Compose m r) (t (ASTOn c)) (ASTOn c)
@@ -86,14 +87,15 @@ processAST process (ASTOn br) =
   ASTOn <$> process (processAST process) br
 
 
-class ConversionOn (c :: TypeClass) (d :: TypeClass) where
-  convertTo :: c t => TypeClassOf c -> TypeClassOf d -> Stackable d p -> t a -> p
+newtype Conversion (d :: TypeClass) t = Conversion {
+  conversion :: forall a p. TypeClassOf d -> Stacking d p -> t a -> p
+}
 
-convertAST :: (ConversionOn c d) => ASTOn c -> ASTOn d
+convertAST :: (WithProperty (Conversion d) c) => ASTOn c -> ASTOn d
 convertAST inp = let
   clc = classOf inp
   cld = classOf outp
   outp = case inp of
-    ASTOn br -> convertTo clc cld astStackable br
+    ASTOn br -> (clc |. conversion) cld astStacking br
   in outp
 

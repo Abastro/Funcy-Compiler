@@ -33,11 +33,6 @@ import qualified Data.Graph as Graph
 import Funcy.Base.Util
 import Funcy.Base.AST
 
-
-{-------------------------------------------------------------------
-                          Reference Handling
---------------------------------------------------------------------}
-
 -- TODO Load required module first -> Needs be addressed by main process
 
 
@@ -108,7 +103,6 @@ type Rearrange
   = ReaderT Location
     (WriterT [RefError]
     Id)
-
 
 
 theBinding :: Lens' (SyntaxIndex Id) Binding

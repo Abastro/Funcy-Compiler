@@ -11,10 +11,11 @@ import Funcy.Reference.Refers
 -- TODO transition to next form
 class Traversable t => ReferSugar t where
   -- |Index each part
-  tagPart :: t a -> t (SyntaxIndex [], a)
+  tagIndex :: t a -> t (SyntaxIndex [], a)
 
   -- |Desugar process
   desugar :: t a -> Desugar t
+
 
 instance WithProperty Traversing ReferSugar where
   property _ = Traversing traverse
@@ -22,7 +23,7 @@ instance WithProperty Traversing ReferSugar where
 
 procRearrange :: ASTProcOn ReferSugar Rearrange Referred
 procRearrange = mkProcess (TypeClassOf @ReferSugar)
-  $ internalProcRearr (Indexing tagPart) (Specific desugar)
+  $ internalProcRearr (Indexing tagIndex) (Specific desugar)
 
 
 {-------------------------------------------------------------------
@@ -32,7 +33,7 @@ procRearrange = mkProcess (TypeClassOf @ReferSugar)
 
 -- |Reference case
 instance ReferSugar Reference where
-  tagPart = coerce
+  tagIndex = coerce
   desugar ref = Desugar {
     _expandPart = defaultExpandPart, -- Placeholder
     _foldInto = Refers $ getReference ref
