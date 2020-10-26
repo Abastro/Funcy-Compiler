@@ -24,6 +24,8 @@ library
       Funcy.Base.AST
       Funcy.Base.Message
       Funcy.Base.Modules
+      Funcy.Base.Recursive
+      Funcy.Base.Report
       Funcy.Base.Util
       Funcy.Reference.Process
       Funcy.Reference.Refers
@@ -34,13 +36,24 @@ library
       Paths_funcy_compiler
   hs-source-dirs:
       src
-  default-extensions: FlexibleContexts FlexibleInstances MultiParamTypeClasses DataKinds ConstraintKinds DeriveFunctor DeriveFoldable DeriveTraversable TypeApplications TupleSections
+  default-extensions:
+      FlexibleContexts
+      FlexibleInstances
+      MultiParamTypeClasses
+      DataKinds
+      ConstraintKinds
+      DeriveFunctor
+      DeriveFoldable
+      DeriveTraversable
+      TypeApplications
+      TupleSections
   build-depends:
       array ==0.5.*
     , base >=4.7 && <5
     , containers ==0.6.*
     , generic-deriving >=1.11 && <1.14
     , lens ==4.19.*
+    , transformers == 0.5.*
     , mtl ==2.2.*
   default-language: Haskell2010
 

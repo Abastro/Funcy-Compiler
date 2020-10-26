@@ -1,89 +1,62 @@
+{-------------------------------------------------------------------
+                            Utilities
+--------------------------------------------------------------------}
+
+
+{-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
-
 module Funcy.Base.Util where
 
 import Control.Monad.Identity ( Identity )
 
 import Control.Lens.TH ( makePrisms )
 import Control.Lens.Type
-  ( Lens, Iso, Getter, Setter, Fold, Traversal )
+  ( LensLike, Lens, Iso, Getter, Setter, Fold, Traversal )
 import Control.Lens.Combinators
   ( FoldableWithIndex, TraversableWithIndex, IndexedFold, IndexedTraversal )
 import qualified Control.Lens.Combinators as Lens
 
 import Data.Kind ( Constraint )
+import Data.Traversable ( fmapDefault, foldMapDefault )
 
-import Data.Graph ( Graph, SCC )
+import Data.Graph ( SCC )
 import Data.IntMap ( IntMap )
 import Data.Map ( Map )
 import qualified Data.IntMap as IntMap
 import qualified Data.Map as Map
 
 
-
-{-------------------------------------------------------------------
-                              Basics
---------------------------------------------------------------------}
-
 type TypeClass = (* -> *) -> Constraint
 type TypeProp = (* -> *) -> *
 
--- Type representing certain typeclass
+-- |Type representing certain typeclass
 data TypeClassOf (c :: TypeClass) = TypeClassOf
 
-
-classOf :: f c -> TypeClassOf c
+classOf :: f c a -> TypeClassOf c
 classOf = const $ TypeClassOf
+
+classOf' :: forall (f :: TypeProp) g c. f (g c) -> TypeClassOf c
+classOf' = const $ TypeClassOf
 
 
 type Id = Identity
 
-invfmap :: Functor f => f (a -> b) -> a -> f b
-invfmap f x = ($ x) <$> f
-
-
--- |Property. First parameter MUST be constant, being certain property.
-class WithProperty p (c :: TypeClass) where
-  property :: (c t) => TypeClassOf c -> p t
-
-infix 9 |.
-(|.) :: (WithProperty p c, c t) => TypeClassOf c -> (p t -> a) -> a
-(|.) cl = ($ property cl)
-
-
-newtype Traversing t = Traversing {
-  traversing :: forall a b. Traversal (t a) (t b) a b
-}
-
+-- |Collection Indexing
 newtype Indexing i t = Indexing {
-  indexing :: forall a. t a -> t (i, a)
+  getIndexing :: forall a. t a -> t (i, a)
 }
 
+-- |Create Isomorphism with given indexing
+indexIso :: (Functor t) => Indexing i t -> Iso (t a) (t b) (t (i, a)) (t (j, b))
+indexIso indexing = Lens.iso (getIndexing indexing) (fmap snd)
+
+-- |Specifics Getter
 newtype Specific p t = Specific {
-  specific :: forall a. t a -> p t
+  getSpecific :: forall a. t a -> p t
 }
 
-{-------------------------------------------------------------------
-                          Lens Utilities
---------------------------------------------------------------------}
-
--- Re-exported basic combinators (with restrictions)
-folded :: Foldable f => Fold (f a) a
-folded = Lens.folded
-
-mapped :: Functor f => Setter (f a) (f b) a b
-mapped = Lens.mapped
-
-traversed :: Traversable f => Traversal (f a) (f b) a b
-traversed = Lens.traversed
-
-ifolded :: FoldableWithIndex i f => IndexedFold i (f a) a
-ifolded = Lens.ifolded
-
-itraversed :: TraversableWithIndex i f => IndexedTraversal i (f a) (f b) a b
-itraversed = Lens.itraversed
 
 attached :: Lens (i, a) (j, a) i j
 attached = Lens._1
@@ -101,11 +74,6 @@ map2Getter = Lens.to . fmap . fmap . Lens.view
 map3Getter :: (Functor f, Functor g, Functor h) => Getter s a -> Getter (f (g (h s))) (f (g (h a)))
 map3Getter = Lens.to . fmap . fmap . fmap . Lens.view
 
-
-
-{-------------------------------------------------------------------
-                      Data Structure Wrappers
---------------------------------------------------------------------}
 
 -- | Dictionary, i.e. map. Used alike a multiset.
 class (Foldable f) => Dictionary f where

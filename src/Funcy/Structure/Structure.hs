@@ -5,6 +5,7 @@ import Control.Lens.Operators ( (^.) )
 
 import Data.Monoid (Endo(..))
 
+import Funcy.Base.Util
 import Funcy.Base.AST
 import Funcy.Reference.Refers
 import Funcy.Reference.Process
@@ -18,13 +19,11 @@ data TypeUni a =
 
 instance ReferSugar TypeUni where
   tagIndex (TypeUni n) = TypeUni n
-  tagIndex (Typed tp term) = Typed
-    (SyntaxIndex "#type" [], tp)
-    (SyntaxIndex "#term" [], term)
+  tagIndex (Typed tp term) = Typed ([], tp) ([], term)
 
   desugar _ = Desugar {
     _expandPart = defaultExpandPart,
-    _foldInto = Simple $ Endo id
+    _foldInto = Simple id
   }
 
 vForceT :: Infer a Binding
@@ -36,13 +35,12 @@ bindTyped = TypeBinder $ \r -> do
   pure [(tpName, r ^. theTerm)]
 
 instance InferType TypeUni where
-  tagTPart st (TypeUni n) = TypeUni n
-  tagTPart st (Typed tp term) = Typed
-    (TypingIndex "#type" $ bindTyped, tp)
-    (TypingIndex "#term" defaultBinder, term)
+  tagTPart _ (TypeUni n) = TypeUni n
+  tagTPart _ (Typed tp term) = Typed
+    (bindTyped, tp) (defaultBinder, term)
 
-  combine st (TypeUni n) = pure $ stack st $ TypeUni (n+1)
-  combine st (Typed inferTp _) = do
+  combine st (TypeUni n) = pure $ stack st undefined $ TypeUni (n+1)
+  combine _ (Typed inferTp _) = do
     tpName <- vForceT
     specTp <- sBoundOf tpName -- Specified, should not error
     tell [Constraint {inTerm = inferTp, outTerm = specTp}]
@@ -58,29 +56,27 @@ data BasicTerm a =
   | ElimFunc a a                  -- t1 (t2)
   | IntroPair Binding a a         -- (x = t1, t2)
   | ElimPair Side a               -- t.(0|1)
+  | IntroBool a                   -- 0|1 (as Bool)
+  | ElimBool a a a                -- if t1 then t2 else t3
   deriving (Functor, Foldable, Traversable)
 
--- TODO 2-type and case-specific r's into (2->r)
 
 instance ReferSugar BasicTerm where
   tagIndex (IntroFunc bnd tp term) = IntroFunc bnd
-    (SyntaxIndex "#tparam" [bnd], tp)
-    (SyntaxIndex "#ret" [], term)
+    ([bnd], tp) ([], term)
 
   tagIndex (ElimFunc fun par) = ElimFunc
-    (SyntaxIndex "#func" [], fun)
-    (SyntaxIndex "#param" [], par)
+    ([], fun) ([], par)
 
   tagIndex (IntroPair bnd dep rest) = IntroPair bnd
-    (SyntaxIndex "#dep" [bnd], dep)
-    (SyntaxIndex "#rest" [], rest)
+    ([bnd], dep) ([], rest)
 
   tagIndex (ElimPair side pair) = ElimPair side
-    (SyntaxIndex "#pair" [], pair)
+    ([], pair)
 
   desugar _ = Desugar {
     _expandPart = defaultExpandPart,
-    _foldInto = Simple $ Endo id
+    _foldInto = Simple id
   }
 
 
@@ -93,40 +89,40 @@ bindIntroPair bnd = TypeBinder $ \r -> do
   pure [(bnd, r ^. theType)]
 
 instance InferType BasicTerm where
-  tagTPart st (IntroFunc bnd tp term) = IntroFunc bnd
-    (TypingIndex "#tparam" $ bindIntroFunc bnd, tp)
-    (TypingIndex "#ret" $ defaultBinder, term)
+  tagTPart _ (IntroFunc bnd tp term) = IntroFunc bnd
+    (bindIntroFunc bnd, tp)
+    (defaultBinder, term)
 
-  tagTPart st (ElimFunc fun par) = ElimFunc
-    (TypingIndex "#func" defaultBinder, fun)
-    (TypingIndex "#param" defaultBinder, par)
+  tagTPart _ (ElimFunc fun par) = ElimFunc
+    (defaultBinder, fun)
+    (defaultBinder, par)
 
-  tagTPart st (IntroPair bnd dep rest) = IntroPair bnd
-    (TypingIndex "#dep" $ bindIntroPair bnd, dep)
-    (TypingIndex "#rest" defaultBinder, rest)
+  tagTPart _ (IntroPair bnd dep rest) = IntroPair bnd
+    (bindIntroPair bnd, dep)
+    (defaultBinder, rest)
 
-  tagTPart st (ElimPair side pair) = ElimPair side
-    (TypingIndex "#pair" defaultBinder, pair)
+  tagTPart _ (ElimPair side pair) = ElimPair side
+    (defaultBinder, pair)
 
   combine st (IntroFunc bnd _ tp) = do
     parTp <- sBoundOf bnd -- Specified, should not error
-    pure $ stack st $ FuncType bnd parTp tp
+    pure $ stack st undefined $ FuncType bnd parTp tp
 
   combine st (ElimFunc funTp parTp) = do
     bnd <- mkVar "param"
-    resT <- stack st . Reference <$> mkVar "tres"
-    let funTp' = stack st $ FuncType bnd parTp resT
+    resT <- stack st undefined . Reference <$> mkVar "tres"
+    let funTp' = stack st undefined $ FuncType bnd parTp resT
     tell [Constraint {inTerm = funTp, outTerm = funTp'}]
     pure resT
 
   combine st (IntroPair bnd depTp restTp) = do
-    pure $ stack st $ PairType bnd depTp restTp
+    pure $ stack st undefined $ PairType bnd depTp restTp
 
   combine st (ElimPair side pairTp) = do
     bnd <- mkVar "dep"
-    depT <- stack st . Reference <$> mkVar "tdep"
-    resT <- stack st . Reference <$> mkVar "tres"
-    let pairTp' = stack st $ PairType bnd depT resT
+    depT <- stack st undefined . Reference <$> mkVar "tdep"
+    resT <- stack st undefined . Reference <$> mkVar "tres"
+    let pairTp' = stack st undefined $ PairType bnd depT resT
     tell [Constraint {inTerm = pairTp, outTerm = pairTp'}]
     case side of
       Dep -> pure depT

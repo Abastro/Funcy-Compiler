@@ -1,22 +1,20 @@
 {-# LANGUAGE TemplateHaskell #-}
 module Funcy.Typing.Infers (
   Constraint(..), TypedTerm(..), theType, theTerm,
-  TypingIndex(..), TypeBinder(..), defaultBinder, TypeCombine(..),
+  TypeBinder(..), defaultBinder, TypeCombine(..),
   Infer, mkVar, boundOf, sBoundOf,
-  internalProcInfer
+  intProcInfer,
 ) where
 
-import Control.Monad.Identity ( Identity )
+import Control.Monad ( (>=>) )
 import Control.Monad.Reader
     ( MonadTrans(..), ReaderT, MonadReader(..) )
-import Control.Monad.Writer ( WriterT )
+import Control.Monad.Writer ( WriterT, listen )
 import Control.Monad.Except ( ExceptT, throwError )
 
 import Control.Lens.TH ( makeLenses )
 import Control.Lens.Operators ( (^.), (<>=) )
 import qualified Control.Lens.Combinators as Lens
-
-import Data.Coerce ( coerce )
 
 import Funcy.Base.Util
 import Funcy.Base.AST
@@ -31,6 +29,22 @@ data Constraint t = Constraint {
   outTerm :: t
 }
 
+-- TODO How would disambiguation go with
+-- forall a. a -> (forall a. a -> a)
+data TpRepr t = TpRepr {
+  tpVar :: [Binding],
+  constraint :: [Constraint t],
+  conType :: t
+}
+
+instance Semigroup (TpRepr t) where
+  -- Takes latter type
+  TpRepr v c _ <> TpRepr v' c' t' = TpRepr (v <> v') (c <> c') t'
+
+instance Monoid (TpRepr t) where
+  mempty = TpRepr [] [] undefined
+
+
 data TypedTerm p a = TypedTerm {
   _theTerm :: a,
   _theType :: p
@@ -41,7 +55,6 @@ $(makeLenses ''TypedTerm)
 data InferCtx a = InferCtx {
   _getVar :: String -> Binding,
   _getBound :: Binding -> Maybe a,
-  _subCtx :: Binding -> InferCtx a,
   _addBound :: [(Binding, a)] -> InferCtx a
 }
 $(makeLenses ''InferCtx)
@@ -59,11 +72,11 @@ sBoundOf :: Binding -> Infer a a
 sBoundOf bnd = boundOf bnd >>= maybe (throwError internal) pure
 
 -- |Denotes inference procedure
-type Infer a
+type Infer t
   = ExceptT ErrorMsg
-    (ReaderT (InferCtx a)
-    (WriterT [Constraint a]
-    Identity))
+    (ReaderT (InferCtx t)
+    (WriterT (TpRepr t)
+    Id))
 
 
 newtype TypeBinder p = TypeBinder {
@@ -80,39 +93,32 @@ newtype TypeCombine p t = TypeCombine {
 defaultBinder :: TypeBinder p
 defaultBinder = TypeBinder $ const $ pure []
 
-data TypingIndex p = TypingIndex {
-  _partName :: String,
-  _binder :: TypeBinder p
-}
-$(makeLenses ''TypingIndex)
-
 
 data InState p = InState {
+  _location :: Loc,
   _bounds :: [(Binding, p)]
 }
 $(makeLenses ''InState)
 
-internalProcInfer :: (Traversable term) =>
-  Indexing (TypingIndex p) term -> TypeCombine p term ->
-  (ASTProcIn term (Infer p) (TypedTerm p)) (TypingIndex p) (InState p) p
-internalProcInfer dex comb = ASTProcIn {
-  mkState = const $ InState [],
-  tagBranch = indexing dex,
-  onState = \part sub -> do
+intProcInfer :: (Traversable term) =>
+  (a -> Loc) -> StOn t k a -> Indexing (TypeBinder a) term -> TypeCombine a term ->
+  ASTProcIn term (Infer a) Loc Loc a b
+intProcInfer getLoc stack indexing combine subProc =
+  stateHover (\l -> do
+    return InState { _location = l, _bounds = [] }
+  ) >=> indexHover (indexIso indexing) (stTravHover $ \(binder, br) -> do
     bnds <- Lens.use bounds
-    res <- lift $ local (childCtx (part ^. partName) . applyBnd bnds) sub
-    extBnds <- lift $ bindType (part ^. binder) res
+    (res, tpRepr) <- lift $ listen $ local (applyBnd bnds) $ subProc br
+    extBnds <- lift $ bindType binder $ undefined -- TODO Disambiguate binding?
     bounds <>= extBnds
-    pure (part, res),
-  mergeBranch = \state br -> do
-    let tps = Lens.view (content . theType) <$> br
-    let term = Lens.view (content . theTerm) <$> br
-    tp <- local (applyBnd $ state ^. bounds) $ combineType comb tps
-    pure $ TypedTerm term tp
-} where
-  childCtx name = Lens.foldMapOf subCtx ($ name)
-  applyBnd bnds = Lens.foldMapOf addBound ($ bnds)
-
+    return (binder, res)
+  ) >=> stateHover (\st -> do
+    let bnds = st ^. bounds
+    tp <- lift $ local (applyBnd bnds) $ combineType combine undefined
+    return st
+  ) >=> stateHover (return . Lens.view location)
+  where
+    applyBnd bnds = Lens.foldMapOf addBound ($ bnds)
 
 
 {-------------------------------------------------------------------

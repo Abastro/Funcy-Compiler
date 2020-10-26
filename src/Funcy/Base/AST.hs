@@ -1,101 +1,101 @@
-{-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE ExistentialQuantification #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE TemplateHaskell #-}
-module Funcy.Base.AST (
-  Binding, Location, (//), Reference(..),
-  ASTOn, Stacking(..), astStacking,
-  ASTProcOn, ASTProcIn(..), mkProcess, processAST,
-  Conversion(..), convertAST
-) where
-
-import Control.Monad.State ( StateT(..) )
-import Control.Lens.Type ( LensLike', Traversal )
-import qualified Control.Lens.Combinators as Lens
-
-import Data.Functor.Compose ( Compose(..) )
-
-import Funcy.Base.Util
-
 {-------------------------------------------------------------------
                       Abstract Syntax Tree
 --------------------------------------------------------------------}
 
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE ExistentialQuantification #-}
+module Funcy.Base.AST (
+  Binding, Loc(..), Reference(..),
+  Nodal, Node(..), getMetadata,
+  AST, StOn(..), astStack,
+  mapHover, stateHover, stateInvHover, stTravHover,
+  indexHover, travHover, itravHover,
+  ASTProcIn, ASTProc, genProcOver,
+) where
+
+import Data.Tuple
+
+import Control.Monad.State ( StateT(..) )
+
+import Control.Lens.Type ( LensLike, Traversal, Iso )
+import qualified Control.Lens.Combinators as Lens
+
+import Funcy.Base.Util
+import Funcy.Base.Recursive
+
 -- |Binding reference name
 type Binding = String
 
--- |Location
-newtype Location = Location [String] deriving (Eq)
-
-(//) :: Location -> String -> Location
-(Location loc) // name = Location (name : loc)
-infixr 5 //
-
+data Loc = Loc {
+  beginOffset :: Int,
+  endOffset :: Int
+}
 
 newtype Reference a = Reference {
   getReference :: Binding
 } deriving (Functor, Foldable, Traversable)
 
 
-
-data ASTOn (c :: TypeClass) =
-  forall t. (c t) => ASTOn (t (ASTOn c))
-
-newtype Stacking (c :: TypeClass) p = Stacking {
-  stack :: forall t. (c t) => t p -> p
+type Nodal t k a = (k, t a)
+data Node (c :: TypeClass) k a = forall t. (c t) => Node (Nodal t k a)
+type AST c k = Fix (Node c k)
+newtype StOn c k a = StOn {
+  stack :: forall t. (c t) => k -> t a -> a
 }
 
-astStacking :: Stacking c (ASTOn c)
-astStacking = Stacking ASTOn
+astStack :: StOn c k (AST c k)
+astStack = StOn $ fmap (Fix . Node) . (,)
 
-{-------------------------------------------------------------------
-                          AST Processes
---------------------------------------------------------------------}
+getMetadata :: Node c k a -> k
+getMetadata (Node (m, _)) = m
 
+-- |Mapping Hover
+mapHover :: (Traversable t) => Traversal (Nodal t k a) (Nodal t k b) (t a) (t b)
+mapHover = content
 
-type ASTProcOn (c :: TypeClass) m r =
-  forall t. (c t) => LensLike' (Compose m r) (t (ASTOn c)) (ASTOn c)
+-- |Stateful Hover
+stateHover :: (Functor m) =>
+  (k -> StateT (t a) m l) -> Nodal t k a -> m (Nodal t l a)
+stateHover = uncurry . fmap runStateT
 
-data ASTProcIn t m r i s b = ASTProcIn {
-  -- |Create state
-  mkState :: forall a. t a -> s,
-  -- |Tag branches before local processing
-  tagBranch :: forall a. t a -> t (i, a),
-  -- |Handle local process on state (parameter is the subcall)
-  onState :: i -> m (r b) -> StateT s m (i, r b),
-  -- |Merge branches after local processing
-  mergeBranch :: forall a. s -> t (i, r a) -> m (r (t a))
-}
+-- |Stateful inverse hover, where metadata is the state
+stateInvHover :: (Functor m) =>
+  (t a -> StateT k m (t b)) -> Nodal t k a -> m (Nodal t k b)
+stateInvHover = uncurry . flip . fmap (fmap (fmap swap) . runStateT)
 
-mkProcess :: (Monad m, Functor r, WithProperty Traversing c, c t) =>
-  TypeClassOf c -> ASTProcIn t m r i s a -> LensLike' (Compose m r) (t a) a
-mkProcess cl ASTProcIn {
-  mkState = mkState,
-  tagBranch = tagBranch,
-  onState = onState,
-  mergeBranch = mergeBranch
-} subProc br = Compose $ do
-  let localA i = onState i . getCompose . subProc
-  let proced = (cl |. traversing) (uncurry localA) (tagBranch br)
-  runStateT proced (mkState br) >>= uncurry (flip mergeBranch)
+-- |Stateful inverse traversing hover
+stTravHover :: (Monad m, Traversable t) =>
+  (a -> StateT k m b) -> Nodal t k a -> m (Nodal t k b)
+stTravHover = stateInvHover . Lens.traversed
 
+-- |Indexed Hover
+indexHover :: (Traversable t) => Iso (t a) (t b) (t (i, a)) (t (j, b)) ->
+  Traversal (Nodal t k a) (Nodal t k b) (Nodal t k (i, a)) (Nodal t k (j, b))
+indexHover indexing = Lens.alongside id indexing
 
--- |Processing of AST (Depth-first traversal)
-processAST :: (Monad m, Functor r) =>
-  ASTProcOn c m r -> ASTOn c -> (Compose m r) (ASTOn c)
-processAST process (ASTOn br) =
-  ASTOn <$> process (processAST process) br
+-- |Traversing Hover, usually for subcall
+travHover :: (Traversable t) => Traversal (Nodal t k a) (Nodal t k b) a b
+travHover = content . Lens.traversed
+
+-- |Traversing Hover with Index, usually for subcall
+itravHover :: (Traversable t) => Iso (t a) (t b) (t (i, a)) (t (i, b)) ->
+  Traversal (Nodal t k a) (Nodal t k b) (i, a) (i, b)
+itravHover indexing = content . indexing . Lens.traversed
 
 
-newtype Conversion (d :: TypeClass) t = Conversion {
-  conversion :: forall a p. TypeClassOf d -> Stacking d p -> t a -> p
-}
+-- |Internal AST Process
+type ASTProcIn t m k l a b = LensLike m (Nodal t k a) (Nodal t l b) a b
 
-convertAST :: (WithProperty (Conversion d) c) => ASTOn c -> ASTOn d
-convertAST inp = let
-  clc = classOf inp
-  cld = classOf outp
-  outp = case inp of
-    ASTOn br -> (clc |. conversion) cld astStacking br
-  in outp
+-- |Typeclassed AST Process
+type ASTProcOn c m k l a b =
+  LensLike m (Node c k a) (Node c l b) a b
+
+-- |Exposed AST Process
+type ASTProc c m k l = ASTProcOn c m k l (AST c k) (AST c l)
+
+-- |Generalize process over a typeclass
+genProcOver :: (Monad m) => (forall t. (c t) => ASTProcIn t m k l a b) ->
+  ASTProcOn c m k l a b
+genProcOver l f (Node nodal) = Node <$> l f nodal
 
